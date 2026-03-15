@@ -1,0 +1,5 @@
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.9
+email-validator==2.1.0
