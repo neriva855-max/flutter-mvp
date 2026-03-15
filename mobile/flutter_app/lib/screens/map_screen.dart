@@ -66,11 +66,18 @@ class _MapScreenState extends State<MapScreen> {
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      if (mounted) {
-        setState(() {
-          _currentPosition = LatLng(position.latitude, position.longitude);
-          _errorMessage = null;
-        });
+      if (!mounted) return;
+      final target = LatLng(position.latitude, position.longitude);
+      setState(() {
+        _currentPosition = target;
+        _errorMessage = null;
+      });
+      if (_mapController != null) {
+        _mapController!.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(target: target, zoom: 14),
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -117,6 +124,7 @@ class _MapScreenState extends State<MapScreen> {
     final mapHeight = _isMapExpanded ? height : height * 0.45;
 
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(title: const Text('Map')),
       body: Column(
         children: [
@@ -134,6 +142,18 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                   onMapCreated: (controller) {
                     _mapController = controller;
+                    if (_currentPosition != null) {
+                      _mapController!.moveCamera(
+                        CameraUpdate.newCameraPosition(
+                          CameraPosition(
+                            target: _currentPosition!,
+                            zoom: 14,
+                          ),
+                        ),
+                      );
+                    } else if (_locationPermissionGranted) {
+                      _getCurrentPosition();
+                    }
                   },
                   myLocationEnabled: _locationPermissionGranted,
                   myLocationButtonEnabled: false,
@@ -236,68 +256,84 @@ class _RoutePlannerPanel extends StatelessWidget {
       ),
       child: SafeArea(
         top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.outline.withValues(alpha: 0.7),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(
+                20,
+                12,
+                20,
+                16 + MediaQuery.of(context).viewInsets.bottom,
+              ),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        margin: const EdgeInsets.only(bottom: 16),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.outline
+                              .withValues(alpha: 0.7),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                    ),
+                    Text(
+                      'Plan your route',
+                      style: theme.textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Current position',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: currentPositionController,
+                      decoration: InputDecoration(
+                        prefixIcon: const Icon(Icons.my_location),
+                        hintText: 'Use current location or enter a place',
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Destination',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: destinationController,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.place),
+                        hintText: 'Where do you want to go?',
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // Placeholder for future route-planning actions (e.g. fetch route, summary).
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Text(
+                          'Route options coming soon',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-              Text(
-                'Plan your route',
-                style: theme.textTheme.titleMedium,
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'Current position',
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-              ),
-              const SizedBox(height: 6),
-              TextField(
-                controller: currentPositionController,
-                decoration: InputDecoration(
-                  prefixIcon: const Icon(Icons.my_location),
-                  hintText: 'Use current location or enter a place',
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Destination',
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-              ),
-              const SizedBox(height: 6),
-              TextField(
-                controller: destinationController,
-                decoration: const InputDecoration(
-                  prefixIcon: Icon(Icons.place),
-                  hintText: 'Where do you want to go?',
-                ),
-              ),
-              const SizedBox(height: 16),
-              // Placeholder for future route-planning actions (e.g. fetch route, summary).
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Text(
-                    'Route options coming soon',
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                  ),
-                ],
-              ),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
