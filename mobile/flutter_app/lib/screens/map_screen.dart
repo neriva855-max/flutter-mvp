@@ -17,6 +17,11 @@ class _MapScreenState extends State<MapScreen> {
   bool _locationPermissionGranted = false;
   String? _errorMessage;
   bool _loadingPermission = true;
+  bool _isMapExpanded = false;
+
+  final TextEditingController _currentPositionController =
+      TextEditingController();
+  final TextEditingController _destinationController = TextEditingController();
 
   @override
   void initState() {
@@ -93,6 +98,8 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _mapController?.dispose();
+     _currentPositionController.dispose();
+     _destinationController.dispose();
     super.dispose();
   }
 
@@ -105,49 +112,193 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
+    final mediaQuery = MediaQuery.of(context);
+    final height = mediaQuery.size.height;
+    final mapHeight = _isMapExpanded ? height : height * 0.45;
+
     return Scaffold(
       appBar: AppBar(title: const Text('Map')),
-      body: Stack(
+      body: Column(
         children: [
-          GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: _currentPosition ?? _defaultPosition,
-              zoom: 14,
-            ),
-            onMapCreated: (controller) {
-              _mapController = controller;
-            },
-            myLocationEnabled: _locationPermissionGranted,
-            myLocationButtonEnabled: false,
-          ),
-          if (_errorMessage != null)
-            Positioned(
-              top: 16,
-              left: 16,
-              right: 16,
-              child: Material(
-                color: Theme.of(context).colorScheme.errorContainer,
-                borderRadius: BorderRadius.circular(12),
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    _errorMessage!,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: Theme.of(context).colorScheme.onErrorContainer,
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeInOut,
+            height: mapHeight,
+            width: double.infinity,
+            child: Stack(
+              children: [
+                GoogleMap(
+                  initialCameraPosition: CameraPosition(
+                    target: _currentPosition ?? _defaultPosition,
+                    zoom: 14,
+                  ),
+                  onMapCreated: (controller) {
+                    _mapController = controller;
+                  },
+                  myLocationEnabled: _locationPermissionGranted,
+                  myLocationButtonEnabled: false,
+                ),
+                if (_errorMessage != null)
+                  Positioned(
+                    top: 16,
+                    left: 16,
+                    right: 16,
+                    child: Material(
+                      color: Theme.of(context).colorScheme.errorContainer,
+                      borderRadius: BorderRadius.circular(12),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Text(
+                          _errorMessage!,
+                          style:
+                              Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onErrorContainer,
+                                  ),
                         ),
+                      ),
+                    ),
+                  ),
+                Positioned(
+                  top: 16,
+                  right: 16,
+                  child: Material(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    shape: const CircleBorder(),
+                    child: IconButton(
+                      icon: Icon(
+                        _isMapExpanded ? Icons.keyboard_arrow_down : Icons.fullscreen,
+                      ),
+                      tooltip: _isMapExpanded
+                          ? 'Collapse map'
+                          : 'Expand map',
+                      onPressed: () {
+                        setState(() {
+                          _isMapExpanded = !_isMapExpanded;
+                        });
+                      },
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: 16,
+                  right: 16,
+                  child: FloatingActionButton(
+                    onPressed: _centerOnCurrentLocation,
+                    child: const Icon(Icons.my_location),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (!_isMapExpanded)
+            Expanded(
+              child: _RoutePlannerPanel(
+                currentPositionController: _currentPositionController,
+                destinationController: _destinationController,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RoutePlannerPanel extends StatelessWidget {
+  const _RoutePlannerPanel({
+    required this.currentPositionController,
+    required this.destinationController,
+  });
+
+  final TextEditingController currentPositionController;
+  final TextEditingController destinationController;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(24),
+          topRight: Radius.circular(24),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.4),
+            blurRadius: 16,
+            offset: const Offset(0, -8),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.outline.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(999),
                   ),
                 ),
               ),
-            ),
-          Positioned(
-            bottom: 24,
-            right: 16,
-            child: FloatingActionButton(
-              onPressed: _centerOnCurrentLocation,
-              child: const Icon(Icons.my_location),
-            ),
+              Text(
+                'Plan your route',
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Current position',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 6),
+              TextField(
+                controller: currentPositionController,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.my_location),
+                  hintText: 'Use current location or enter a place',
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Destination',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 6),
+              TextField(
+                controller: destinationController,
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.place),
+                  hintText: 'Where do you want to go?',
+                ),
+              ),
+              const SizedBox(height: 16),
+              // Placeholder for future route-planning actions (e.g. fetch route, summary).
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(
+                    'Route options coming soon',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
