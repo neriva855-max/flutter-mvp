@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../services/api_service.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -18,6 +19,12 @@ class _MapScreenState extends State<MapScreen> {
   String? _errorMessage;
   bool _loadingPermission = true;
   bool _isMapExpanded = false;
+
+  bool _isRouteLoading = false;
+  Set<Marker> _markers = {};
+  Set<Polyline> _polylines = {};
+  String? _distanceText;
+  String? _durationText;
 
   final TextEditingController _currentPositionController =
       TextEditingController();
@@ -102,6 +109,120 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  Future<void> _getRoute() async {
+    final originText = _currentPositionController.text.trim();
+    final destinationText = _destinationController.text.trim();
+
+    if (originText.isEmpty || destinationText.isEmpty) {
+      setState(() {
+        _errorMessage = 'Please enter both current position and destination.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isRouteLoading = true;
+      _errorMessage = null;
+    });
+
+    final result = await ApiService().getRoute(
+      origin: originText,
+      destination: destinationText,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _isRouteLoading = false;
+    });
+
+    if (result['success'] != true) {
+      setState(() {
+        _errorMessage =
+            result['message'] as String? ?? 'Failed to fetch route.';
+      });
+      return;
+    }
+
+    final points = (result['points'] as List<dynamic>? ?? [])
+        .cast<Map<String, dynamic>>();
+
+    if (points.length < 2) {
+      setState(() {
+        _errorMessage = 'Route data is incomplete.';
+      });
+      return;
+    }
+
+    final List<LatLng> routePoints = points
+        .map(
+          (p) => LatLng(
+            (p['lat'] as num).toDouble(),
+            (p['lng'] as num).toDouble(),
+          ),
+        )
+        .toList();
+
+    final originLatLng = routePoints.first;
+    final destinationLatLng = routePoints.last;
+
+    final markers = <Marker>{
+      Marker(
+        markerId: const MarkerId('origin'),
+        position: originLatLng,
+        infoWindow: const InfoWindow(title: 'Origin'),
+      ),
+      Marker(
+        markerId: const MarkerId('destination'),
+        position: destinationLatLng,
+        infoWindow: const InfoWindow(title: 'Destination'),
+      ),
+    };
+
+    final routePolyline = Polyline(
+      polylineId: const PolylineId('route'),
+      color: Theme.of(context).colorScheme.primary,
+      width: 5,
+      points: routePoints,
+    );
+
+    setState(() {
+      _markers = markers;
+      _polylines = {routePolyline};
+      _distanceText = result['distance_text'] as String?;
+      _durationText = result['duration_text'] as String?;
+    });
+
+    if (_mapController != null) {
+      final bounds = _boundsFromLatLngList(routePoints);
+      if (bounds != null) {
+        await _mapController!.animateCamera(
+          CameraUpdate.newLatLngBounds(bounds, 60),
+        );
+      }
+    }
+  }
+
+  LatLngBounds? _boundsFromLatLngList(List<LatLng> points) {
+    if (points.isEmpty) return null;
+    double minLat = points.first.latitude;
+    double maxLat = points.first.latitude;
+    double minLng = points.first.longitude;
+    double maxLng = points.first.longitude;
+
+    for (final p in points.skip(1)) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+
+    return LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
+  }
+
   @override
   void dispose() {
     _mapController?.dispose();
@@ -157,6 +278,8 @@ class _MapScreenState extends State<MapScreen> {
                   },
                   myLocationEnabled: _locationPermissionGranted,
                   myLocationButtonEnabled: false,
+                  markers: _markers,
+                  polylines: _polylines,
                 ),
                 if (_errorMessage != null)
                   Positioned(
@@ -217,6 +340,10 @@ class _MapScreenState extends State<MapScreen> {
               child: _RoutePlannerPanel(
                 currentPositionController: _currentPositionController,
                 destinationController: _destinationController,
+                isRouteLoading: _isRouteLoading,
+                distanceText: _distanceText,
+                durationText: _durationText,
+                onGetRoute: _getRoute,
               ),
             ),
         ],
@@ -229,10 +356,18 @@ class _RoutePlannerPanel extends StatelessWidget {
   const _RoutePlannerPanel({
     required this.currentPositionController,
     required this.destinationController,
+    required this.isRouteLoading,
+    required this.distanceText,
+    required this.durationText,
+    required this.onGetRoute,
   });
 
   final TextEditingController currentPositionController;
   final TextEditingController destinationController;
+  final bool isRouteLoading;
+  final String? distanceText;
+  final String? durationText;
+  final VoidCallback onGetRoute;
 
   @override
   Widget build(BuildContext context) {
@@ -317,18 +452,36 @@ class _RoutePlannerPanel extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 16),
-                    // Placeholder for future route-planning actions (e.g. fetch route, summary).
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
                       children: [
-                        Text(
-                          'Route options coming soon',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: isRouteLoading ? null : onGetRoute,
+                            child: isRouteLoading
+                                ? const SizedBox(
+                                    height: 18,
+                                    width: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Text('Get Route'),
                           ),
                         ),
                       ],
                     ),
+                    if (distanceText != null || durationText != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        [
+                          distanceText,
+                          durationText,
+                        ].whereType<String>().join(' • '),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
