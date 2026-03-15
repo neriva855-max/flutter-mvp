@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 /// Replace YOUR_LAPTOP_IP_HERE with your machine's IP (e.g. 192.168.1.100).
 /// On Android emulator use 10.0.2.2 instead of localhost.
 // ignore: constant_identifier_names
-const String BASE_URL = 'http://192.168.0.60:8000';
+const String BASE_URL = '';
 
 class ApiService {
   static final ApiService _instance = ApiService._();
