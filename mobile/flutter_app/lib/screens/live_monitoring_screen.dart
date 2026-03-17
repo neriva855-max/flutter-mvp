@@ -13,9 +13,11 @@ class LiveMonitoringScreen extends StatefulWidget {
 
 class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   StreamSubscription<AccelerometerEvent>? _accelSub;
+  StreamSubscription<UserAccelerometerEvent>? _userAccelSub;
   StreamSubscription<GyroscopeEvent>? _gyroSub;
 
   _SensorStrategy? _strategy;
+  _MotionMetricSource _motionSource = _MotionMetricSource.none;
 
   // Accelerometer-based pitch/roll (stable absolute tilt, disturbed by linear acceleration).
   double _accelPitchRad = 0.0;
@@ -32,6 +34,13 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   // Smoothed for UI responsiveness (final output).
   double _pitchSmoothed = 0.0;
   double _rollSmoothed = 0.0;
+
+  // Motion metrics (session = "current ride" while this page is active).
+  double _currentAccel = 0.0; // m/s^2 (magnitude)
+  double _currentVelocity = 0.0; // m/s (estimated; drift-prone)
+  double _maxAccel = 0.0; // m/s^2
+  double _maxVelocity = 0.0; // m/s
+  DateTime? _lastMotionTs;
 
   DateTime? _lastGyroTs;
   String? _sensorError;
@@ -54,11 +63,18 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     final accelAvailable = await _probeStream<AccelerometerEvent>(
       () => accelerometerEventStream(),
     );
+    final userAccelAvailable = await _probeStream<UserAccelerometerEvent>(
+      () => userAccelerometerEventStream(),
+    );
     final gyroAvailable = await _probeStream<GyroscopeEvent>(
       () => gyroscopeEventStream(),
     );
 
     if (!mounted) return;
+
+    _motionSource = userAccelAvailable
+        ? _MotionMetricSource.userAccel
+        : (accelAvailable ? _MotionMetricSource.accelHighPass : _MotionMetricSource.none);
 
     if (accelAvailable && gyroAvailable) {
       setState(() => _strategy = _SensorStrategy.fused);
@@ -89,6 +105,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     _cancelSubs();
     _lastGyroTs = null;
     _sensorError = null;
+    _lastMotionTs = null;
 
     // ACCEL: updates the long-term absolute tilt estimate.
     _accelSub = accelerometerEventStream().listen((event) {
@@ -101,9 +118,29 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
 
       _accelPitchRad = _wrapPi(pitch);
       _accelRollRad = _wrapPi(roll);
+
+      // Motion metrics fallback (if no user accelerometer): high-pass magnitude estimate.
+      if (_motionSource == _MotionMetricSource.accelHighPass) {
+        final mag = math.sqrt(ax * ax + ay * ay + az * az);
+        // Subtract ~g to remove gravity; clamp and smooth.
+        final lin = (mag - 9.81).abs();
+        _updateMotionMetrics(lin);
+      }
     }, onError: (e) {
       if (mounted) setState(() => _sensorError = e.toString());
     });
+
+    if (_motionSource == _MotionMetricSource.userAccel) {
+      _userAccelSub = userAccelerometerEventStream().listen((event) {
+        final ax = event.x;
+        final ay = event.y;
+        final az = event.z;
+        final mag = math.sqrt(ax * ax + ay * ay + az * az);
+        _updateMotionMetrics(mag);
+      }, onError: (e) {
+        if (mounted) setState(() => _sensorError = e.toString());
+      });
+    }
 
     // GYRO: integrates fast motion; fused with accel for stability.
     _gyroSub = gyroscopeEventStream().listen((event) {
@@ -139,6 +176,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   void _startAccelOnly() {
     _cancelSubs();
     _sensorError = null;
+    _lastMotionTs = null;
 
     _accelSub = accelerometerEventStream().listen((event) {
       final ax = event.x;
@@ -155,16 +193,36 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
       _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
       _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
 
+      if (_motionSource == _MotionMetricSource.accelHighPass) {
+        final mag = math.sqrt(ax * ax + ay * ay + az * az);
+        final lin = (mag - 9.81).abs();
+        _updateMotionMetrics(lin);
+      }
+
       if (mounted) setState(() {});
     }, onError: (e) {
       if (mounted) setState(() => _sensorError = e.toString());
     });
+
+    if (_motionSource == _MotionMetricSource.userAccel) {
+      _userAccelSub = userAccelerometerEventStream().listen((event) {
+        final ax = event.x;
+        final ay = event.y;
+        final az = event.z;
+        final mag = math.sqrt(ax * ax + ay * ay + az * az);
+        _updateMotionMetrics(mag);
+        if (mounted) setState(() {});
+      }, onError: (e) {
+        if (mounted) setState(() => _sensorError = e.toString());
+      });
+    }
   }
 
   void _startGyroOnly() {
     _cancelSubs();
     _lastGyroTs = null;
     _sensorError = null;
+    _lastMotionTs = null;
 
     // Gyro-only is drift-prone: angles are relative (not absolute) and will
     // slowly drift over time. This is a fallback when no accelerometer is available.
@@ -190,10 +248,60 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     });
   }
 
+  void _updateMotionMetrics(double rawAccel) {
+    // Production-friendly guards: clamp spikes and smooth.
+    final now = DateTime.now();
+    final last = _lastMotionTs;
+    _lastMotionTs = now;
+    final dt = last == null ? null : now.difference(last).inMicroseconds / 1e6;
+
+    // Clamp absurd spikes from sensor glitches.
+    final clamped = rawAccel.clamp(0.0, 30.0);
+
+    // Smooth acceleration magnitude.
+    const accelAlpha = 0.18;
+    _currentAccel = _lerp(_currentAccel, clamped, accelAlpha);
+
+    // Update max acceleration with a small noise floor.
+    if (_currentAccel.isFinite && _currentAccel > 0.3) {
+      _maxAccel = math.max(_maxAccel, _currentAccel);
+    }
+
+    // Velocity estimate (drift-prone): integrate acceleration magnitude.
+    // We apply a small decay to prevent runaway drift during UI testing.
+    if (dt != null && dt > 0 && dt < 0.2) {
+      // Ignore tiny accelerations (noise) for integration.
+      final effectiveAccel = (_currentAccel < 0.25) ? 0.0 : _currentAccel;
+
+      // Integrate as "speed magnitude". This is not true vehicle speed.
+      _currentVelocity += effectiveAccel * dt;
+
+      // Drift guard: gentle decay (simulates friction / bias removal).
+      const decayPerSecond = 0.35; // m/s per second
+      _currentVelocity = math.max(0.0, _currentVelocity - decayPerSecond * dt);
+
+      // Clamp to reasonable display range.
+      _currentVelocity = _currentVelocity.clamp(0.0, 60.0);
+      _maxVelocity = math.max(_maxVelocity, _currentVelocity);
+    }
+  }
+
+  void _resetRideStats() {
+    setState(() {
+      _currentAccel = 0.0;
+      _currentVelocity = 0.0;
+      _maxAccel = 0.0;
+      _maxVelocity = 0.0;
+      _lastMotionTs = null;
+    });
+  }
+
   void _cancelSubs() {
     _accelSub?.cancel();
+    _userAccelSub?.cancel();
     _gyroSub?.cancel();
     _accelSub = null;
+    _userAccelSub = null;
     _gyroSub = null;
   }
 
@@ -206,9 +314,25 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final currentKmh = _currentVelocity * 3.6;
+    final maxKmh = _maxVelocity * 3.6;
+
+    final peakAccelFor0100 = _maxAccel;
+    final peak0100Seconds = _computeZeroToHundredSeconds(peakAccelFor0100);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Live Monitoring')),
+      appBar: AppBar(
+        title: const Text('Live Monitoring'),
+        actions: [
+          IconButton(
+            tooltip: 'Reset ride stats',
+            onPressed: _strategy == null || _strategy == _SensorStrategy.none
+                ? null
+                : _resetRideStats,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -289,6 +413,46 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Motion metrics',
+                    style: theme.textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      _MetricCard(
+                        title: 'Current Acceleration',
+                        value: '${_currentAccel.toStringAsFixed(2)} m/s²',
+                        subline: peak0100Seconds == null
+                            ? 'Peak acceleration equivalent 0–100 km/h: —'
+                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                      ),
+                      _MetricCard(
+                        title: 'Current Velocity',
+                        value: '${currentKmh.toStringAsFixed(1)} km/h',
+                        subline: peak0100Seconds == null
+                            ? 'Peak acceleration equivalent 0–100 km/h: —'
+                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                      ),
+                      _MetricCard(
+                        title: 'Max Acceleration (ride)',
+                        value: '${_maxAccel.toStringAsFixed(2)} m/s²',
+                        subline: peak0100Seconds == null
+                            ? 'Peak acceleration equivalent 0–100 km/h: —'
+                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                      ),
+                      _MetricCard(
+                        title: 'Max Velocity (ride)',
+                        value: '${maxKmh.toStringAsFixed(1)} km/h',
+                        subline: peak0100Seconds == null
+                            ? 'Peak acceleration equivalent 0–100 km/h: —'
+                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                      ),
+                    ],
+                  ),
                 ],
               );
             },
@@ -301,7 +465,74 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
 
 enum _SensorStrategy { fused, accelOnly, gyroOnly, none }
 
+enum _MotionMetricSource { userAccel, accelHighPass, none }
+
 enum _TiltMode { pitch, roll }
+
+double? _computeZeroToHundredSeconds(double accel) {
+  // 100 km/h in m/s.
+  const deltaV = 100 / 3.6;
+  // Guard against noise/tiny/negative/absurd acceleration.
+  if (!accel.isFinite) return null;
+  if (accel < 0.5) return null;
+  if (accel > 20) return null;
+  final t = deltaV / accel;
+  if (!t.isFinite || t <= 0) return null;
+  // Cap to avoid absurd values from near-zero accel.
+  return t.clamp(0.0, 120.0);
+}
+
+class _MetricCard extends StatelessWidget {
+  const _MetricCard({
+    required this.title,
+    required this.value,
+    required this.subline,
+  });
+
+  final String title;
+  final String value;
+  final String subline;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final width = (MediaQuery.of(context).size.width - 16 * 2 - 12) / 2;
+
+    return SizedBox(
+      width: width.clamp(160.0, 360.0),
+      child: Material(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                value,
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 10),
+              Text(
+                subline,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _TiltBox extends StatelessWidget {
   const _TiltBox({
