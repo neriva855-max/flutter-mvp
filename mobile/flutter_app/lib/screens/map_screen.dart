@@ -109,6 +109,55 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  Future<LatLng?> _getOrRequestCurrentLatLng() async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (mounted) {
+        setState(() => _errorMessage = 'Location services are disabled.');
+      }
+      return null;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.deniedForever ||
+        permission == LocationPermission.denied) {
+      if (mounted) {
+        setState(() => _errorMessage = 'Location permission denied.');
+      }
+      return null;
+    }
+
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      final target = LatLng(position.latitude, position.longitude);
+      if (mounted) {
+        setState(() {
+          _currentPosition = target;
+          _locationPermissionGranted = true;
+          _errorMessage = null;
+        });
+      }
+      if (_mapController != null) {
+        await _mapController!.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(target: target, zoom: 14),
+          ),
+        );
+      }
+      return target;
+    } catch (_) {
+      if (mounted) {
+        setState(() => _errorMessage = 'Could not get location.');
+      }
+      return null;
+    }
+  }
+
   Future<void> _getRoute() async {
     final originText = _currentPositionController.text.trim();
     final destinationText = _destinationController.text.trim();
@@ -356,6 +405,7 @@ class _MapScreenState extends State<MapScreen> {
                     distanceText: _distanceText,
                     durationText: _durationText,
                     onGetRoute: _getRoute,
+                    getCurrentLatLng: _getOrRequestCurrentLatLng,
                   ),
                 ),
             ],
@@ -374,6 +424,7 @@ class _RoutePlannerPanel extends StatefulWidget {
     required this.distanceText,
     required this.durationText,
     required this.onGetRoute,
+    required this.getCurrentLatLng,
   });
 
   final TextEditingController currentPositionController;
@@ -382,6 +433,7 @@ class _RoutePlannerPanel extends StatefulWidget {
   final String? distanceText;
   final String? durationText;
   final VoidCallback onGetRoute;
+  final Future<LatLng?> Function() getCurrentLatLng;
 
   @override
   State<_RoutePlannerPanel> createState() => _RoutePlannerPanelState();
@@ -390,6 +442,10 @@ class _RoutePlannerPanel extends StatefulWidget {
 class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
   final FocusNode _originFocusNode = FocusNode();
   final FocusNode _destinationFocusNode = FocusNode();
+  final ScrollController _scrollController = ScrollController();
+
+  final GlobalKey _originFieldKey = GlobalKey();
+  final GlobalKey _destinationFieldKey = GlobalKey();
 
   Timer? _originDebounce;
   Timer? _destinationDebounce;
@@ -403,6 +459,11 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
   bool _showOriginSuggestionsBox = false;
   bool _showDestinationSuggestionsBox = false;
 
+  bool _isCurrentLocationLoading = false;
+  String? _currentLocationError;
+  // ignore: unused_field
+  LatLng? _originLatLng; // stored for future use (origin by coordinates)
+
   // Stored for future routing/geocoding (place_id + selected text).
   // ignore: unused_field
   String? _selectedOriginPlaceId;
@@ -415,12 +476,24 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
   void initState() {
     super.initState();
     _originFocusNode.addListener(() {
-      if (!_originFocusNode.hasFocus) {
+      if (_originFocusNode.hasFocus) {
+        setState(() {
+          _showOriginSuggestionsBox = true;
+          _showDestinationSuggestionsBox = false;
+        });
+        _scrollToKey(_originFieldKey);
+      } else {
         setState(() => _showOriginSuggestionsBox = false);
       }
     });
     _destinationFocusNode.addListener(() {
-      if (!_destinationFocusNode.hasFocus) {
+      if (_destinationFocusNode.hasFocus) {
+        setState(() {
+          _showDestinationSuggestionsBox = true;
+          _showOriginSuggestionsBox = false;
+        });
+        _scrollToKey(_destinationFieldKey);
+      } else {
         setState(() => _showDestinationSuggestionsBox = false);
       }
     });
@@ -432,7 +505,50 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
     _destinationDebounce?.cancel();
     _originFocusNode.dispose();
     _destinationFocusNode.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  void _scrollToKey(GlobalKey key) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = key.currentContext;
+      if (ctx == null) return;
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        alignment: 0.15,
+      );
+    });
+  }
+
+  Future<void> _useCurrentLocationForOrigin() async {
+    setState(() {
+      _isCurrentLocationLoading = true;
+      _currentLocationError = null;
+    });
+    final latLng = await widget.getCurrentLatLng();
+    if (!mounted) return;
+    if (latLng == null) {
+      setState(() {
+        _isCurrentLocationLoading = false;
+        _currentLocationError = 'Unable to access current location.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isCurrentLocationLoading = false;
+      _currentLocationError = null;
+      _originLatLng = latLng;
+      _originSuggestions = [];
+      _originSuggestionsError = null;
+      _isOriginSuggestionsLoading = false;
+      _showOriginSuggestionsBox = false;
+    });
+
+    widget.currentPositionController.text = 'Current location';
+    _destinationFocusNode.requestFocus();
   }
 
   void _onOriginChanged(String value) {
@@ -441,6 +557,7 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
       _selectedOriginFullText = null;
       _selectedOriginPlaceId = null;
     }
+    _originLatLng = null;
 
     _originDebounce?.cancel();
     if (query.length < 2) {
@@ -448,7 +565,7 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
         _originSuggestions = [];
         _originSuggestionsError = null;
         _isOriginSuggestionsLoading = false;
-        _showOriginSuggestionsBox = false;
+        _showOriginSuggestionsBox = _originFocusNode.hasFocus;
       });
       return;
     }
@@ -501,7 +618,7 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
         _destinationSuggestions = [];
         _destinationSuggestionsError = null;
         _isDestinationSuggestionsLoading = false;
-        _showDestinationSuggestionsBox = false;
+        _showDestinationSuggestionsBox = _destinationFocusNode.hasFocus;
       });
       return;
     }
@@ -568,6 +685,9 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final viewInsetsBottom = MediaQuery.of(context).viewInsets.bottom;
+    final isKeyboardVisible = viewInsetsBottom > 0;
+    final isSearching = _originFocusNode.hasFocus || _destinationFocusNode.hasFocus;
 
     return Container(
       width: double.infinity,
@@ -589,19 +709,24 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
         top: false,
         child: LayoutBuilder(
           builder: (context, constraints) {
-            return SingleChildScrollView(
-              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            return AnimatedPadding(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
               padding: EdgeInsets.fromLTRB(
                 20,
-                12,
+                isSearching ? 6 : 12,
                 20,
-                16 + MediaQuery.of(context).viewInsets.bottom,
+                16 + viewInsetsBottom,
               ),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
                     Center(
                       child: Container(
                         width: 40,
@@ -626,25 +751,35 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    TextField(
-                      controller: widget.currentPositionController,
-                      focusNode: _originFocusNode,
-                      onChanged: _onOriginChanged,
-                      textInputAction: TextInputAction.next,
-                      onSubmitted: (_) => _destinationFocusNode.requestFocus(),
-                      decoration: InputDecoration(
-                        prefixIcon: const Icon(Icons.my_location),
-                        hintText: 'Use current location or enter a place',
+                    Container(
+                      key: _originFieldKey,
+                      child: TextField(
+                        controller: widget.currentPositionController,
+                        focusNode: _originFocusNode,
+                        onChanged: _onOriginChanged,
+                        textInputAction: TextInputAction.next,
+                        onSubmitted: (_) =>
+                            _destinationFocusNode.requestFocus(),
+                        decoration: InputDecoration(
+                          prefixIcon: const Icon(Icons.my_location),
+                          hintText: 'Search origin',
+                        ),
                       ),
                     ),
                     if (_showOriginSuggestionsBox)
                       _SuggestionsDropdown(
                         suggestions: _originSuggestions,
-                        isLoading: _isOriginSuggestionsLoading,
-                        errorMessage: _originSuggestionsError,
-                        emptyMessage: 'No matches found',
+                        isLoading:
+                            _isOriginSuggestionsLoading || _isCurrentLocationLoading,
+                        errorMessage: _originSuggestionsError ?? _currentLocationError,
+                        emptyMessage: 'Type to search places',
                         onTapSuggestion: _selectOriginSuggestion,
                         showWhenEmpty: true,
+                        maxHeight: isKeyboardVisible ? 240 : 280,
+                        header: _CurrentLocationRow(
+                          onTap: _useCurrentLocationForOrigin,
+                          isLoading: _isCurrentLocationLoading,
+                        ),
                       ),
                     const SizedBox(height: 16),
                     Text(
@@ -654,15 +789,18 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    TextField(
-                      controller: widget.destinationController,
-                      focusNode: _destinationFocusNode,
-                      onChanged: _onDestinationChanged,
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => FocusScope.of(context).unfocus(),
-                      decoration: const InputDecoration(
-                        prefixIcon: Icon(Icons.place),
-                        hintText: 'Where do you want to go?',
+                    Container(
+                      key: _destinationFieldKey,
+                      child: TextField(
+                        controller: widget.destinationController,
+                        focusNode: _destinationFocusNode,
+                        onChanged: _onDestinationChanged,
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => FocusScope.of(context).unfocus(),
+                        decoration: const InputDecoration(
+                          prefixIcon: Icon(Icons.place),
+                          hintText: 'Search destination',
+                        ),
                       ),
                     ),
                     if (_showDestinationSuggestionsBox)
@@ -670,9 +808,10 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
                         suggestions: _destinationSuggestions,
                         isLoading: _isDestinationSuggestionsLoading,
                         errorMessage: _destinationSuggestionsError,
-                        emptyMessage: 'No matches found',
+                        emptyMessage: 'Type to search places',
                         onTapSuggestion: _selectDestinationSuggestion,
                         showWhenEmpty: true,
+                        maxHeight: isKeyboardVisible ? 240 : 280,
                       ),
                     const SizedBox(height: 16),
                     Row(
@@ -707,7 +846,8 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
                         ),
                       ),
                     ],
-                  ],
+                    ],
+                  ),
                 ),
               ),
             );
@@ -726,6 +866,8 @@ class _SuggestionsDropdown extends StatelessWidget {
     required this.emptyMessage,
     required this.onTapSuggestion,
     required this.showWhenEmpty,
+    required this.maxHeight,
+    this.header,
   });
 
   final List<_PlaceSuggestion> suggestions;
@@ -734,6 +876,8 @@ class _SuggestionsDropdown extends StatelessWidget {
   final String emptyMessage;
   final ValueChanged<_PlaceSuggestion> onTapSuggestion;
   final bool showWhenEmpty;
+  final double maxHeight;
+  final Widget? header;
 
   @override
   Widget build(BuildContext context) {
@@ -743,119 +887,185 @@ class _SuggestionsDropdown extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
+    const minListHeight = 56.0 * 3; // ~3 visible rows
+
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Material(
         color: theme.colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Builder(
-            builder: (context) {
-              if (isLoading) {
-                return Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Row(
-                    children: [
-                      const SizedBox(
-                        height: 16,
-                        width: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Searching...',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              if (errorMessage != null) {
-                return Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    errorMessage!,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.error,
-                    ),
-                  ),
-                );
-              }
-
-              if (suggestions.isEmpty) {
-                return Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    emptyMessage,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                );
-              }
-
-              return ListView.separated(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: suggestions.length,
-                separatorBuilder: (context, index) => Divider(
-                  height: 1,
-                  thickness: 1,
-                  color: theme.colorScheme.outline.withValues(alpha: 0.35),
-                ),
-                itemBuilder: (context, index) {
-                  final s = suggestions[index];
-                  return InkWell(
-                    onTap: () => onTapSuggestion(s),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            Icons.place,
-                            size: 18,
-                            color: theme.colorScheme.primary,
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            // Keep a stable visible height so suggestions don't get hidden
+            // behind the keyboard and we always show ~3 rows.
+            minHeight: header == null ? minListHeight : (minListHeight + 56),
+            maxHeight: maxHeight,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (header case final Widget h) h,
+              Expanded(
+                child: Builder(
+                  builder: (context) {
+                    if (isLoading) {
+                      return Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(
+                                height: 16,
+                                width: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                'Searching...',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
                           ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
+                        ),
+                      );
+                    }
+
+                    if (errorMessage != null) {
+                      return Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Text(
+                          errorMessage!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.error,
+                          ),
+                        ),
+                      );
+                    }
+
+                    if (suggestions.isEmpty) {
+                      return Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Text(
+                          emptyMessage,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      );
+                    }
+
+                    return ListView.separated(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      physics: const ClampingScrollPhysics(),
+                      itemCount: suggestions.length,
+                      separatorBuilder: (context, index) => Divider(
+                        height: 1,
+                        thickness: 1,
+                        color: theme.colorScheme.outline.withValues(alpha: 0.35),
+                      ),
+                      itemBuilder: (context, index) {
+                        final s = suggestions[index];
+                        return InkWell(
+                          onTap: () => onTapSuggestion(s),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            child: Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  s.mainText,
-                                  style: theme.textTheme.bodyMedium?.copyWith(
-                                    fontWeight: FontWeight.w600,
+                                Icon(
+                                  Icons.place,
+                                  size: 18,
+                                  color: theme.colorScheme.primary,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        s.mainText,
+                                        style: theme.textTheme.bodyMedium?.copyWith(
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      if (s.secondaryText.isNotEmpty) ...[
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          s.secondaryText,
+                                          style: theme.textTheme.bodySmall?.copyWith(
+                                            color: theme
+                                                .colorScheme
+                                                .onSurfaceVariant,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ),
-                                if (s.secondaryText.isNotEmpty) ...[
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    s.secondaryText,
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color:
-                                          theme.colorScheme.onSurfaceVariant,
-                                    ),
-                                  ),
-                                ],
                               ],
                             ),
                           ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              );
-            },
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CurrentLocationRow extends StatelessWidget {
+  const _CurrentLocationRow({
+    required this.onTap,
+    required this.isLoading,
+  });
+
+  final VoidCallback onTap;
+  final bool isLoading;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return InkWell(
+      onTap: isLoading ? null : onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Row(
+          children: [
+            Icon(
+              Icons.my_location,
+              size: 18,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Current location',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (isLoading)
+              const SizedBox(
+                height: 16,
+                width: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+          ],
         ),
       ),
     );
