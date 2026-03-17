@@ -19,6 +19,7 @@ class _MapScreenState extends State<MapScreen> {
   String? _errorMessage;
   bool _loadingPermission = true;
   bool _isMapExpanded = false;
+  bool _isSearchActive = false;
 
   bool _isRouteLoading = false;
   Set<Marker> _markers = {};
@@ -296,7 +297,19 @@ class _MapScreenState extends State<MapScreen> {
       body: LayoutBuilder(
         builder: (context, constraints) {
           final height = constraints.maxHeight;
-          final mapHeight = _isMapExpanded ? height : height * 0.45;
+          final keyboardBottomInset = MediaQuery.of(context).viewInsets.bottom;
+          final isKeyboardVisible = keyboardBottomInset > 0;
+
+          // Refinement: only collapse the map when the keyboard is visible.
+          // This prioritizes search suggestions during typing, but restores the
+          // normal preview map size when the keyboard is dismissed.
+          const double collapsedFraction = 0.22;
+          final double normalFraction = 0.45;
+
+          final shouldCollapseMap = isKeyboardVisible && _isSearchActive;
+          final mapHeight = _isMapExpanded
+              ? height
+              : height * (shouldCollapseMap ? collapsedFraction : normalFraction);
 
           return Column(
             children: [
@@ -406,6 +419,11 @@ class _MapScreenState extends State<MapScreen> {
                     durationText: _durationText,
                     onGetRoute: _getRoute,
                     getCurrentLatLng: _getOrRequestCurrentLatLng,
+                    onSearchActiveChanged: (active) {
+                      if (_isSearchActive != active) {
+                        setState(() => _isSearchActive = active);
+                      }
+                    },
                   ),
                 ),
             ],
@@ -425,6 +443,7 @@ class _RoutePlannerPanel extends StatefulWidget {
     required this.durationText,
     required this.onGetRoute,
     required this.getCurrentLatLng,
+    required this.onSearchActiveChanged,
   });
 
   final TextEditingController currentPositionController;
@@ -434,6 +453,7 @@ class _RoutePlannerPanel extends StatefulWidget {
   final String? durationText;
   final VoidCallback onGetRoute;
   final Future<LatLng?> Function() getCurrentLatLng;
+  final ValueChanged<bool> onSearchActiveChanged;
 
   @override
   State<_RoutePlannerPanel> createState() => _RoutePlannerPanelState();
@@ -481,9 +501,17 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
           _showOriginSuggestionsBox = true;
           _showDestinationSuggestionsBox = false;
         });
+        widget.onSearchActiveChanged(true);
         _scrollToKey(_originFieldKey);
       } else {
         setState(() => _showOriginSuggestionsBox = false);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              !_originFocusNode.hasFocus &&
+              !_destinationFocusNode.hasFocus) {
+            widget.onSearchActiveChanged(false);
+          }
+        });
       }
     });
     _destinationFocusNode.addListener(() {
@@ -492,9 +520,17 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
           _showDestinationSuggestionsBox = true;
           _showOriginSuggestionsBox = false;
         });
+        widget.onSearchActiveChanged(true);
         _scrollToKey(_destinationFieldKey);
       } else {
         setState(() => _showDestinationSuggestionsBox = false);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              !_originFocusNode.hasFocus &&
+              !_destinationFocusNode.hasFocus) {
+            widget.onSearchActiveChanged(false);
+          }
+        });
       }
     });
   }
@@ -517,7 +553,7 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
         ctx,
         duration: const Duration(milliseconds: 180),
         curve: Curves.easeOutCubic,
-        alignment: 0.15,
+        alignment: 0.08,
       );
     });
   }
