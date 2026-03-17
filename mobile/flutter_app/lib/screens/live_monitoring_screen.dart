@@ -15,6 +15,8 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   StreamSubscription<AccelerometerEvent>? _accelSub;
   StreamSubscription<GyroscopeEvent>? _gyroSub;
 
+  _SensorStrategy? _strategy;
+
   // Accelerometer-based pitch/roll (stable absolute tilt, disturbed by linear acceleration).
   double _accelPitchRad = 0.0;
   double _accelRollRad = 0.0;
@@ -37,72 +39,167 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   @override
   void initState() {
     super.initState();
-    _startSensors();
+    _initSensors();
   }
 
-  void _startSensors() {
-    try {
-      _accelSub = accelerometerEventStream().listen((event) {
-        // sensors_plus: x,y,z in m/s^2. When stationary, the vector mostly
-        // represents gravity. We'll derive tilt angles from this vector.
-        final ax = event.x;
-        final ay = event.y;
-        final az = event.z;
+  Future<void> _initSensors() async {
+    setState(() {
+      _strategy = null;
+      _sensorError = null;
+    });
 
-        // Pitch: rotation around device x-axis (tilt forward/back).
-        // Roll: rotation around device y-axis (tilt left/right).
-        //
-        // Note: formulas can vary by coordinate convention; this provides a
-        // stable, intuitive tilt visualization for most devices.
-        final pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az));
-        final roll = math.atan2(ay, az);
+    // sensors_plus does not provide explicit availability APIs on all platforms.
+    // Practical strategy: attempt to receive the first event from each stream
+    // with a short timeout. If it times out or throws, treat as unavailable.
+    final accelAvailable = await _probeStream<AccelerometerEvent>(
+      () => accelerometerEventStream(),
+    );
+    final gyroAvailable = await _probeStream<GyroscopeEvent>(
+      () => gyroscopeEventStream(),
+    );
 
-        _accelPitchRad = _wrapPi(pitch);
-        _accelRollRad = _wrapPi(roll);
-      }, onError: (e) {
-        if (mounted) setState(() => _sensorError = e.toString());
-      });
+    if (!mounted) return;
 
-      _gyroSub = gyroscopeEventStream().listen((event) {
-        final now = DateTime.now();
-        final last = _lastGyroTs;
-        _lastGyroTs = now;
-        if (last == null) return;
-
-        final dt = now.difference(last).inMicroseconds / 1e6;
-        if (dt <= 0 || dt > 0.2) return;
-
-        // Integrate gyro rates (rad/s) -> angles (rad)
-        _gyroPitchRad = _wrapPi(_gyroPitchRad + event.x * dt);
-        _gyroRollRad = _wrapPi(_gyroRollRad + event.y * dt);
-
-        // Complementary filter: trust gyro for short-term changes, accel for long-term stability.
-        // Typical values: 0.95..0.99.
-        const k = 0.98;
-        _pitchRad = _wrapPi(k * _gyroPitchRad + (1 - k) * _accelPitchRad);
-        _rollRad = _wrapPi(k * _gyroRollRad + (1 - k) * _accelRollRad);
-
-        // Keep the integrator near the fused output to reduce drift buildup.
-        _gyroPitchRad = _pitchRad;
-        _gyroRollRad = _rollRad;
-
-        const uiAlpha = 0.22;
-        _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
-        _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
-
-        if (mounted) setState(() {});
-      }, onError: (e) {
-        if (mounted) setState(() => _sensorError = e.toString());
-      });
-    } catch (e) {
-      _sensorError = e.toString();
+    if (accelAvailable && gyroAvailable) {
+      setState(() => _strategy = _SensorStrategy.fused);
+      _startFusedSensors();
+    } else if (accelAvailable) {
+      setState(() => _strategy = _SensorStrategy.accelOnly);
+      _startAccelOnly();
+    } else if (gyroAvailable) {
+      setState(() => _strategy = _SensorStrategy.gyroOnly);
+      _startGyroOnly();
+    } else {
+      setState(() => _strategy = _SensorStrategy.none);
     }
+  }
+
+  Future<bool> _probeStream<T>(Stream<T> Function() streamFactory) async {
+    try {
+      await streamFactory()
+          .first
+          .timeout(const Duration(milliseconds: 700));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _startFusedSensors() {
+    _cancelSubs();
+    _lastGyroTs = null;
+    _sensorError = null;
+
+    // ACCEL: updates the long-term absolute tilt estimate.
+    _accelSub = accelerometerEventStream().listen((event) {
+      final ax = event.x;
+      final ay = event.y;
+      final az = event.z;
+
+      final pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az));
+      final roll = math.atan2(ay, az);
+
+      _accelPitchRad = _wrapPi(pitch);
+      _accelRollRad = _wrapPi(roll);
+    }, onError: (e) {
+      if (mounted) setState(() => _sensorError = e.toString());
+    });
+
+    // GYRO: integrates fast motion; fused with accel for stability.
+    _gyroSub = gyroscopeEventStream().listen((event) {
+      final now = DateTime.now();
+      final last = _lastGyroTs;
+      _lastGyroTs = now;
+      if (last == null) return;
+
+      final dt = now.difference(last).inMicroseconds / 1e6;
+      if (dt <= 0 || dt > 0.2) return;
+
+      _gyroPitchRad = _wrapPi(_gyroPitchRad + event.x * dt);
+      _gyroRollRad = _wrapPi(_gyroRollRad + event.y * dt);
+
+      const k = 0.98; // gyro weight (higher = more responsive, lower = more stable)
+      _pitchRad = _wrapPi(k * _gyroPitchRad + (1 - k) * _accelPitchRad);
+      _rollRad = _wrapPi(k * _gyroRollRad + (1 - k) * _accelRollRad);
+
+      // Keep integrator anchored to fused output to minimize drift buildup.
+      _gyroPitchRad = _pitchRad;
+      _gyroRollRad = _rollRad;
+
+      const uiAlpha = 0.22;
+      _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
+      _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
+
+      if (mounted) setState(() {});
+    }, onError: (e) {
+      if (mounted) setState(() => _sensorError = e.toString());
+    });
+  }
+
+  void _startAccelOnly() {
+    _cancelSubs();
+    _sensorError = null;
+
+    _accelSub = accelerometerEventStream().listen((event) {
+      final ax = event.x;
+      final ay = event.y;
+      final az = event.z;
+
+      final pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az));
+      final roll = math.atan2(ay, az);
+
+      _pitchRad = _wrapPi(pitch);
+      _rollRad = _wrapPi(roll);
+
+      const uiAlpha = 0.22;
+      _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
+      _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
+
+      if (mounted) setState(() {});
+    }, onError: (e) {
+      if (mounted) setState(() => _sensorError = e.toString());
+    });
+  }
+
+  void _startGyroOnly() {
+    _cancelSubs();
+    _lastGyroTs = null;
+    _sensorError = null;
+
+    // Gyro-only is drift-prone: angles are relative (not absolute) and will
+    // slowly drift over time. This is a fallback when no accelerometer is available.
+    _gyroSub = gyroscopeEventStream().listen((event) {
+      final now = DateTime.now();
+      final last = _lastGyroTs;
+      _lastGyroTs = now;
+      if (last == null) return;
+
+      final dt = now.difference(last).inMicroseconds / 1e6;
+      if (dt <= 0 || dt > 0.2) return;
+
+      _pitchRad = _wrapPi(_pitchRad + event.x * dt);
+      _rollRad = _wrapPi(_rollRad + event.y * dt);
+
+      const uiAlpha = 0.22;
+      _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
+      _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
+
+      if (mounted) setState(() {});
+    }, onError: (e) {
+      if (mounted) setState(() => _sensorError = e.toString());
+    });
+  }
+
+  void _cancelSubs() {
+    _accelSub?.cancel();
+    _gyroSub?.cancel();
+    _accelSub = null;
+    _gyroSub = null;
   }
 
   @override
   void dispose() {
-    _accelSub?.cancel();
-    _gyroSub?.cancel();
+    _cancelSubs();
     super.dispose();
   }
 
@@ -120,6 +217,36 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
               final spacing = 12.0;
               final boxSize = ((constraints.maxWidth - spacing) / 2)
                   .clamp(150.0, 260.0);
+
+              if (_strategy == null) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              if (_strategy == _SensorStrategy.none) {
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Feature not available',
+                          style: theme.textTheme.titleMedium,
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Motion sensors were not detected on this device.',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }
 
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -153,7 +280,11 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    'Tip: tilt your phone to see pitch/roll update.',
+                    _strategy == _SensorStrategy.fused
+                        ? 'Using accelerometer + gyroscope (fused)'
+                        : _strategy == _SensorStrategy.accelOnly
+                            ? 'Using accelerometer only'
+                            : 'Using gyroscope only (drift-prone)',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -167,6 +298,8 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     );
   }
 }
+
+enum _SensorStrategy { fused, accelOnly, gyroOnly, none }
 
 enum _TiltMode { pitch, roll }
 
