@@ -30,6 +30,25 @@ class _MapScreenState extends State<MapScreen> {
       TextEditingController();
   final TextEditingController _destinationController = TextEditingController();
 
+  Timer? _originDebounce;
+  Timer? _destinationDebounce;
+
+  bool _isOriginSuggestionsLoading = false;
+  bool _isDestinationSuggestionsLoading = false;
+  List<_PlaceSuggestion> _originSuggestions = [];
+  List<_PlaceSuggestion> _destinationSuggestions = [];
+  String? _originSuggestionsError;
+  String? _destinationSuggestionsError;
+  bool _showOriginSuggestionsEmpty = false;
+  bool _showDestinationSuggestionsEmpty = false;
+
+  // ignore: unused_field
+  String? _selectedOriginPlaceId; // stored for future routing/geocoding
+  String? _selectedOriginFullText;
+  // ignore: unused_field
+  String? _selectedDestinationPlaceId; // stored for future routing/geocoding
+  String? _selectedDestinationFullText;
+
   @override
   void initState() {
     super.initState();
@@ -226,9 +245,133 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _mapController?.dispose();
-     _currentPositionController.dispose();
-     _destinationController.dispose();
+    _originDebounce?.cancel();
+    _destinationDebounce?.cancel();
+    _currentPositionController.dispose();
+    _destinationController.dispose();
     super.dispose();
+  }
+
+  void _onOriginChanged(String value) {
+    // If user edits after selecting, clear stored selection.
+    if (_selectedOriginFullText != null && value.trim() != _selectedOriginFullText) {
+      _selectedOriginFullText = null;
+      _selectedOriginPlaceId = null;
+    }
+
+    _originDebounce?.cancel();
+    final query = value.trim();
+    if (query.length < 2) {
+      setState(() {
+        _originSuggestions = [];
+        _originSuggestionsError = null;
+        _isOriginSuggestionsLoading = false;
+        _showOriginSuggestionsEmpty = false;
+      });
+      return;
+    }
+    _originDebounce = Timer(const Duration(milliseconds: 350), () async {
+      setState(() {
+        _isOriginSuggestionsLoading = true;
+        _originSuggestionsError = null;
+        _showOriginSuggestionsEmpty = true;
+      });
+      final result = await ApiService().placesAutocomplete(query: query);
+      if (!mounted) return;
+      if (result['success'] != true) {
+        setState(() {
+          _isOriginSuggestionsLoading = false;
+          _originSuggestions = [];
+          _originSuggestionsError =
+              result['message'] as String? ?? 'Failed to fetch suggestions.';
+        });
+        return;
+      }
+      final raw = (result['suggestions'] as List<dynamic>? ?? []);
+      final suggestions = raw
+          .whereType<Map<String, dynamic>>()
+          .map(_PlaceSuggestion.fromJson)
+          .toList();
+      setState(() {
+        _isOriginSuggestionsLoading = false;
+        _originSuggestions = suggestions;
+        _originSuggestionsError = null;
+      });
+    });
+  }
+
+  void _onDestinationChanged(String value) {
+    if (_selectedDestinationFullText != null &&
+        value.trim() != _selectedDestinationFullText) {
+      _selectedDestinationFullText = null;
+      _selectedDestinationPlaceId = null;
+    }
+
+    _destinationDebounce?.cancel();
+    final query = value.trim();
+    if (query.length < 2) {
+      setState(() {
+        _destinationSuggestions = [];
+        _destinationSuggestionsError = null;
+        _isDestinationSuggestionsLoading = false;
+        _showDestinationSuggestionsEmpty = false;
+      });
+      return;
+    }
+    _destinationDebounce = Timer(const Duration(milliseconds: 350), () async {
+      setState(() {
+        _isDestinationSuggestionsLoading = true;
+        _destinationSuggestionsError = null;
+        _showDestinationSuggestionsEmpty = true;
+      });
+      final result = await ApiService().placesAutocomplete(query: query);
+      if (!mounted) return;
+      if (result['success'] != true) {
+        setState(() {
+          _isDestinationSuggestionsLoading = false;
+          _destinationSuggestions = [];
+          _destinationSuggestionsError =
+              result['message'] as String? ?? 'Failed to fetch suggestions.';
+        });
+        return;
+      }
+      final raw = (result['suggestions'] as List<dynamic>? ?? []);
+      final suggestions = raw
+          .whereType<Map<String, dynamic>>()
+          .map(_PlaceSuggestion.fromJson)
+          .toList();
+      setState(() {
+        _isDestinationSuggestionsLoading = false;
+        _destinationSuggestions = suggestions;
+        _destinationSuggestionsError = null;
+      });
+    });
+  }
+
+  void _selectOriginSuggestion(_PlaceSuggestion s) {
+    setState(() {
+      _selectedOriginPlaceId = s.placeId;
+      _selectedOriginFullText = s.fullText;
+      _originSuggestions = [];
+      _originSuggestionsError = null;
+      _isOriginSuggestionsLoading = false;
+      _showOriginSuggestionsEmpty = false;
+    });
+    _currentPositionController.text = s.fullText;
+    FocusScope.of(context).unfocus();
+  }
+
+  void _selectDestinationSuggestion(_PlaceSuggestion s) {
+    setState(() {
+      _selectedDestinationPlaceId = s.placeId;
+      _selectedDestinationFullText = s.fullText;
+      _destinationSuggestions = [];
+      _destinationSuggestionsError = null;
+      _isDestinationSuggestionsLoading = false;
+      _showDestinationSuggestionsEmpty = false;
+    });
+    _destinationController.text = s.fullText;
+    FocusScope.of(context).unfocus();
   }
 
   @override
@@ -344,6 +487,18 @@ class _MapScreenState extends State<MapScreen> {
                 distanceText: _distanceText,
                 durationText: _durationText,
                 onGetRoute: _getRoute,
+                onOriginChanged: _onOriginChanged,
+                onDestinationChanged: _onDestinationChanged,
+                originSuggestions: _originSuggestions,
+                destinationSuggestions: _destinationSuggestions,
+                originSuggestionsLoading: _isOriginSuggestionsLoading,
+                destinationSuggestionsLoading: _isDestinationSuggestionsLoading,
+                originSuggestionsError: _originSuggestionsError,
+                destinationSuggestionsError: _destinationSuggestionsError,
+                onSelectOriginSuggestion: _selectOriginSuggestion,
+                onSelectDestinationSuggestion: _selectDestinationSuggestion,
+                showOriginEmpty: _showOriginSuggestionsEmpty,
+                showDestinationEmpty: _showDestinationSuggestionsEmpty,
               ),
             ),
         ],
@@ -360,6 +515,18 @@ class _RoutePlannerPanel extends StatelessWidget {
     required this.distanceText,
     required this.durationText,
     required this.onGetRoute,
+    required this.onOriginChanged,
+    required this.onDestinationChanged,
+    required this.originSuggestions,
+    required this.destinationSuggestions,
+    required this.originSuggestionsLoading,
+    required this.destinationSuggestionsLoading,
+    required this.originSuggestionsError,
+    required this.destinationSuggestionsError,
+    required this.onSelectOriginSuggestion,
+    required this.onSelectDestinationSuggestion,
+    required this.showOriginEmpty,
+    required this.showDestinationEmpty,
   });
 
   final TextEditingController currentPositionController;
@@ -368,6 +535,18 @@ class _RoutePlannerPanel extends StatelessWidget {
   final String? distanceText;
   final String? durationText;
   final VoidCallback onGetRoute;
+  final ValueChanged<String> onOriginChanged;
+  final ValueChanged<String> onDestinationChanged;
+  final List<_PlaceSuggestion> originSuggestions;
+  final List<_PlaceSuggestion> destinationSuggestions;
+  final bool originSuggestionsLoading;
+  final bool destinationSuggestionsLoading;
+  final String? originSuggestionsError;
+  final String? destinationSuggestionsError;
+  final ValueChanged<_PlaceSuggestion> onSelectOriginSuggestion;
+  final ValueChanged<_PlaceSuggestion> onSelectDestinationSuggestion;
+  final bool showOriginEmpty;
+  final bool showDestinationEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -431,10 +610,19 @@ class _RoutePlannerPanel extends StatelessWidget {
                     const SizedBox(height: 6),
                     TextField(
                       controller: currentPositionController,
+                      onChanged: onOriginChanged,
                       decoration: InputDecoration(
                         prefixIcon: const Icon(Icons.my_location),
                         hintText: 'Use current location or enter a place',
                       ),
+                    ),
+                    _SuggestionsDropdown(
+                      suggestions: originSuggestions,
+                      isLoading: originSuggestionsLoading,
+                      errorMessage: originSuggestionsError,
+                      emptyMessage: 'No matches found',
+                      onTapSuggestion: onSelectOriginSuggestion,
+                      showWhenEmpty: showOriginEmpty,
                     ),
                     const SizedBox(height: 16),
                     Text(
@@ -446,10 +634,19 @@ class _RoutePlannerPanel extends StatelessWidget {
                     const SizedBox(height: 6),
                     TextField(
                       controller: destinationController,
+                      onChanged: onDestinationChanged,
                       decoration: const InputDecoration(
                         prefixIcon: Icon(Icons.place),
                         hintText: 'Where do you want to go?',
                       ),
+                    ),
+                    _SuggestionsDropdown(
+                      suggestions: destinationSuggestions,
+                      isLoading: destinationSuggestionsLoading,
+                      errorMessage: destinationSuggestionsError,
+                      emptyMessage: 'No matches found',
+                      onTapSuggestion: onSelectDestinationSuggestion,
+                      showWhenEmpty: showDestinationEmpty,
                     ),
                     const SizedBox(height: 16),
                     Row(
@@ -489,6 +686,173 @@ class _RoutePlannerPanel extends StatelessWidget {
           },
         ),
       ),
+    );
+  }
+}
+
+class _SuggestionsDropdown extends StatelessWidget {
+  const _SuggestionsDropdown({
+    required this.suggestions,
+    required this.isLoading,
+    required this.errorMessage,
+    required this.emptyMessage,
+    required this.onTapSuggestion,
+    required this.showWhenEmpty,
+  });
+
+  final List<_PlaceSuggestion> suggestions;
+  final bool isLoading;
+  final String? errorMessage;
+  final String emptyMessage;
+  final ValueChanged<_PlaceSuggestion> onTapSuggestion;
+  final bool showWhenEmpty;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    if (!showWhenEmpty && !isLoading && errorMessage == null && suggestions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Material(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Builder(
+            builder: (context) {
+              if (isLoading) {
+                return Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        height: 16,
+                        width: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        'Searching...',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
+              if (errorMessage != null) {
+                return Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(
+                    errorMessage!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    ),
+                  ),
+                );
+              }
+
+              if (suggestions.isEmpty) {
+                return Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(
+                    emptyMessage,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                );
+              }
+
+              return ListView.separated(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: suggestions.length,
+                separatorBuilder: (context, index) => Divider(
+                  height: 1,
+                  thickness: 1,
+                  color: theme.colorScheme.outline.withValues(alpha: 0.35),
+                ),
+                itemBuilder: (context, index) {
+                  final s = suggestions[index];
+                  return InkWell(
+                    onTap: () => onTapSuggestion(s),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.place,
+                            size: 18,
+                            color: theme.colorScheme.primary,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  s.mainText,
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                if (s.secondaryText.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    s.secondaryText,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color:
+                                          theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlaceSuggestion {
+  _PlaceSuggestion({
+    required this.placeId,
+    required this.mainText,
+    required this.secondaryText,
+    required this.fullText,
+  });
+
+  final String placeId;
+  final String mainText;
+  final String secondaryText;
+  final String fullText;
+
+  factory _PlaceSuggestion.fromJson(Map<String, dynamic> json) {
+    return _PlaceSuggestion(
+      placeId: (json['place_id'] ?? '').toString(),
+      mainText: (json['main_text'] ?? '').toString(),
+      secondaryText: (json['secondary_text'] ?? '').toString(),
+      fullText: (json['full_text'] ?? '').toString(),
     );
   }
 }
