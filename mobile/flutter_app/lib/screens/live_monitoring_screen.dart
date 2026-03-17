@@ -12,18 +12,24 @@ class LiveMonitoringScreen extends StatefulWidget {
 }
 
 class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
+  StreamSubscription<AccelerometerEvent>? _accelSub;
   StreamSubscription<GyroscopeEvent>? _gyroSub;
 
-  // Integrated angles (radians). This is a simple gyro integration suitable for
-  // a lightweight MVP visualization (it will drift over time).
-  double _pitch = 0.0; // rotation around x axis
-  double _roll = 0.0; // rotation around y axis
-  double _yaw = 0.0; // rotation around z axis
+  // Accelerometer-based pitch/roll (stable absolute tilt, disturbed by linear acceleration).
+  double _accelPitchRad = 0.0;
+  double _accelRollRad = 0.0;
 
-  // Smoothed angles to make the UI feel responsive but stable.
+  // Gyro-integrated pitch/roll (responsive, but drifts).
+  double _gyroPitchRad = 0.0;
+  double _gyroRollRad = 0.0;
+
+  // Fused pitch/roll (complementary filter output).
+  double _pitchRad = 0.0;
+  double _rollRad = 0.0;
+
+  // Smoothed for UI responsiveness (final output).
   double _pitchSmoothed = 0.0;
   double _rollSmoothed = 0.0;
-  double _yawSmoothed = 0.0;
 
   DateTime? _lastGyroTs;
   String? _sensorError;
@@ -31,11 +37,32 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   @override
   void initState() {
     super.initState();
-    _startGyro();
+    _startSensors();
   }
 
-  void _startGyro() {
+  void _startSensors() {
     try {
+      _accelSub = accelerometerEventStream().listen((event) {
+        // sensors_plus: x,y,z in m/s^2. When stationary, the vector mostly
+        // represents gravity. We'll derive tilt angles from this vector.
+        final ax = event.x;
+        final ay = event.y;
+        final az = event.z;
+
+        // Pitch: rotation around device x-axis (tilt forward/back).
+        // Roll: rotation around device y-axis (tilt left/right).
+        //
+        // Note: formulas can vary by coordinate convention; this provides a
+        // stable, intuitive tilt visualization for most devices.
+        final pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az));
+        final roll = math.atan2(ay, az);
+
+        _accelPitchRad = _wrapPi(pitch);
+        _accelRollRad = _wrapPi(roll);
+      }, onError: (e) {
+        if (mounted) setState(() => _sensorError = e.toString());
+      });
+
       _gyroSub = gyroscopeEventStream().listen((event) {
         final now = DateTime.now();
         final last = _lastGyroTs;
@@ -43,23 +70,25 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
         if (last == null) return;
 
         final dt = now.difference(last).inMicroseconds / 1e6;
-        if (dt <= 0 || dt > 0.2) return; // ignore long gaps
+        if (dt <= 0 || dt > 0.2) return;
 
-        // Integrate gyro angular velocity (rad/s) into angles (rad).
-        _pitch += event.x * dt;
-        _roll += event.y * dt;
-        _yaw += event.z * dt;
+        // Integrate gyro rates (rad/s) -> angles (rad)
+        _gyroPitchRad = _wrapPi(_gyroPitchRad + event.x * dt);
+        _gyroRollRad = _wrapPi(_gyroRollRad + event.y * dt);
 
-        // Wrap to [-pi, pi] to keep values bounded.
-        _pitch = _wrapPi(_pitch);
-        _roll = _wrapPi(_roll);
-        _yaw = _wrapPi(_yaw);
+        // Complementary filter: trust gyro for short-term changes, accel for long-term stability.
+        // Typical values: 0.95..0.99.
+        const k = 0.98;
+        _pitchRad = _wrapPi(k * _gyroPitchRad + (1 - k) * _accelPitchRad);
+        _rollRad = _wrapPi(k * _gyroRollRad + (1 - k) * _accelRollRad);
 
-        // Smooth the visual output.
-        const alpha = 0.18; // lower = smoother, higher = snappier
-        _pitchSmoothed = _lerp(_pitchSmoothed, _pitch, alpha);
-        _rollSmoothed = _lerp(_rollSmoothed, _roll, alpha);
-        _yawSmoothed = _lerp(_yawSmoothed, _yaw, alpha);
+        // Keep the integrator near the fused output to reduce drift buildup.
+        _gyroPitchRad = _pitchRad;
+        _gyroRollRad = _rollRad;
+
+        const uiAlpha = 0.22;
+        _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
+        _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
 
         if (mounted) setState(() {});
       }, onError: (e) {
@@ -72,6 +101,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
 
   @override
   void dispose() {
+    _accelSub?.cancel();
     _gyroSub?.cancel();
     super.dispose();
   }
@@ -88,8 +118,8 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
           child: LayoutBuilder(
             builder: (context, constraints) {
               final spacing = 12.0;
-              final boxSize =
-                  ((constraints.maxWidth - spacing) / 2).clamp(140.0, 220.0);
+              final boxSize = ((constraints.maxWidth - spacing) / 2)
+                  .clamp(150.0, 260.0);
 
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -104,30 +134,26 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
                         ),
                       ),
                     ),
-                  Wrap(
-                    spacing: spacing,
-                    runSpacing: spacing,
+                  Row(
                     children: [
-                      _MonitorBox(
+                      _TiltBox(
                         label: 'Pitch',
                         angleRad: _pitchSmoothed,
                         size: boxSize,
+                        mode: _TiltMode.pitch,
                       ),
-                      _MonitorBox(
-                        label: 'Yaw',
-                        angleRad: _yawSmoothed,
-                        size: boxSize,
-                      ),
-                      _MonitorBox(
+                      const SizedBox(width: 12),
+                      _TiltBox(
                         label: 'Roll',
                         angleRad: _rollSmoothed,
                         size: boxSize,
+                        mode: _TiltMode.roll,
                       ),
                     ],
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    'Tip: rotate/move your phone to see the bars update.',
+                    'Tip: tilt your phone to see pitch/roll update.',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -142,16 +168,20 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   }
 }
 
-class _MonitorBox extends StatelessWidget {
-  const _MonitorBox({
+enum _TiltMode { pitch, roll }
+
+class _TiltBox extends StatelessWidget {
+  const _TiltBox({
     required this.label,
     required this.angleRad,
     required this.size,
+    required this.mode,
   });
 
   final String label;
   final double angleRad;
   final double size;
+  final _TiltMode mode;
 
   @override
   Widget build(BuildContext context) {
@@ -162,8 +192,9 @@ class _MonitorBox extends StatelessWidget {
       width: size,
       height: size,
       child: CustomPaint(
-        painter: _MonitorBoxPainter(
+        painter: _TiltBoxPainter(
           angleRad: angleRad,
+          mode: mode,
           backgroundColor: Colors.black,
           foregroundColor: Colors.white,
         ),
@@ -194,14 +225,16 @@ class _MonitorBox extends StatelessWidget {
   }
 }
 
-class _MonitorBoxPainter extends CustomPainter {
-  _MonitorBoxPainter({
+class _TiltBoxPainter extends CustomPainter {
+  _TiltBoxPainter({
     required this.angleRad,
+    required this.mode,
     required this.backgroundColor,
     required this.foregroundColor,
   });
 
   final double angleRad;
+  final _TiltMode mode;
   final Color backgroundColor;
   final Color foregroundColor;
 
@@ -221,24 +254,36 @@ class _MonitorBoxPainter extends CustomPainter {
     final cx = size.width / 2;
     final cy = size.height / 2;
 
-    // Dotted white reference line: from midpoint down to bottom center.
+    // Dotted white reference line (normal):
+    // - Pitch: vertical line through center.
+    // - Roll: horizontal line through center.
     final refPaint = Paint()
       ..color = foregroundColor.withValues(alpha: 0.85)
       ..strokeWidth = 2
       ..style = PaintingStyle.stroke;
-    _drawDashedLine(
-      canvas,
-      refPaint,
-      Offset(cx, cy),
-      Offset(cx, size.height - 14),
-      dash: 6,
-      gap: 6,
-    );
 
-    // Orientation bar: pivot around the midpoint.
-    // Angle is relative to the reference line (vertical downward).
-    // We interpret 0 rad as aligned with reference; rotate around center.
-    final barLength = size.height * 0.42;
+    if (mode == _TiltMode.pitch) {
+      _drawDashedLine(
+        canvas,
+        refPaint,
+        Offset(cx, 14),
+        Offset(cx, size.height - 14),
+        dash: 6,
+        gap: 6,
+      );
+    } else {
+      _drawDashedLine(
+        canvas,
+        refPaint,
+        Offset(14, cy),
+        Offset(size.width - 14, cy),
+        dash: 6,
+        gap: 6,
+      );
+    }
+
+    // Floating orientation bar: centered, not attached to any edge.
+    final barLength = size.width * 0.58;
     final barPaint = Paint()
       ..color = foregroundColor
       ..strokeWidth = 6
@@ -247,15 +292,31 @@ class _MonitorBoxPainter extends CustomPainter {
     // Clamp the visual rotation so it remains readable in the square box.
     final clamped = angleRad.clamp(-math.pi / 2, math.pi / 2);
 
+    // Add a subtle "float" offset so it visually deviates from the normal line
+    // even when rotation is small.
+    final floatOffset = math.sin(clamped) * (size.width * 0.08);
+
     canvas.save();
     canvas.translate(cx, cy);
-    canvas.rotate(clamped);
-    // Draw from center downward (reference direction).
-    canvas.drawLine(
-      const Offset(0, 0),
-      Offset(0, barLength),
-      barPaint,
-    );
+    if (mode == _TiltMode.pitch) {
+      // Vertical bar that tilts and floats slightly up/down.
+      canvas.translate(0, -floatOffset);
+      canvas.rotate(clamped);
+      canvas.drawLine(
+        Offset(0, -barLength / 2),
+        Offset(0, barLength / 2),
+        barPaint,
+      );
+    } else {
+      // Horizontal bar that tilts and floats slightly left/right.
+      canvas.translate(floatOffset, 0);
+      canvas.rotate(clamped);
+      canvas.drawLine(
+        Offset(-barLength / 2, 0),
+        Offset(barLength / 2, 0),
+        barPaint,
+      );
+    }
     canvas.restore();
 
     canvas.restore();
@@ -289,8 +350,9 @@ class _MonitorBoxPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _MonitorBoxPainter oldDelegate) {
+  bool shouldRepaint(covariant _TiltBoxPainter oldDelegate) {
     return oldDelegate.angleRad != angleRad ||
+        oldDelegate.mode != mode ||
         oldDelegate.backgroundColor != backgroundColor ||
         oldDelegate.foregroundColor != foregroundColor;
   }
