@@ -70,6 +70,12 @@ class RoutePoint(BaseModel):
     lng: float
 
 
+class PlacesAutocompleteRequest(BaseModel):
+    """Request body for places autocomplete."""
+
+    query: str
+
+
 def decode_polyline(encoded: str) -> List[Tuple[float, float]]:
     """Decode a polyline that was encoded using the Google Maps algorithm.
 
@@ -257,6 +263,96 @@ def get_route(body: RouteRequest):
         "duration_text": duration_text,
         "points": points,
     }
+
+
+@app.post("/places/autocomplete")
+def places_autocomplete(body: PlacesAutocompleteRequest):
+    """Return place suggestions for the given query using Google Places API.
+
+    Request body:
+      { "query": "bremen cen" }
+
+    Response:
+      {
+        "success": true,
+        "suggestions": [
+          {
+            "place_id": "...",
+            "main_text": "...",
+            "secondary_text": "...",
+            "full_text": "..."
+          }
+        ]
+      }
+    """
+    query = (body.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    if not GOOGLE_MAPS_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Missing GOOGLE_MAPS_SERVER_API_KEY environment variable",
+        )
+
+    params = {
+        "input": query,
+        "key": GOOGLE_MAPS_API_KEY,
+        # Optional: tweak to bias results; keep minimal for MVP.
+        # "language": "en",
+    }
+
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(
+                "https://maps.googleapis.com/maps/api/place/autocomplete/json",
+                params=params,
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Places API request failed: {type(e).__name__}",
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Places API HTTP {resp.status_code}",
+        )
+
+    data = resp.json()
+    status = data.get("status")
+
+    if status == "ZERO_RESULTS":
+        return {"success": True, "suggestions": []}
+
+    if status != "OK":
+        google_error = data.get("error_message")
+        msg = f"Google Places API status={status}"
+        if google_error:
+            msg = f"{msg}: {google_error}"
+        raise HTTPException(status_code=502, detail=msg)
+
+    predictions = data.get("predictions") or []
+    suggestions = []
+    for p in predictions:
+        place_id = p.get("place_id")
+        full_text = p.get("description") or ""
+        formatting = p.get("structured_formatting") or {}
+        main_text = formatting.get("main_text") or full_text
+        secondary_text = formatting.get("secondary_text") or ""
+        if not place_id or not full_text:
+            continue
+        suggestions.append(
+            {
+                "place_id": place_id,
+                "main_text": main_text,
+                "secondary_text": secondary_text,
+                "full_text": full_text,
+            }
+        )
+
+    return {"success": True, "suggestions": suggestions}
 
 
 if __name__ == "__main__":

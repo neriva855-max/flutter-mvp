@@ -30,25 +30,6 @@ class _MapScreenState extends State<MapScreen> {
       TextEditingController();
   final TextEditingController _destinationController = TextEditingController();
 
-  Timer? _originDebounce;
-  Timer? _destinationDebounce;
-
-  bool _isOriginSuggestionsLoading = false;
-  bool _isDestinationSuggestionsLoading = false;
-  List<_PlaceSuggestion> _originSuggestions = [];
-  List<_PlaceSuggestion> _destinationSuggestions = [];
-  String? _originSuggestionsError;
-  String? _destinationSuggestionsError;
-  bool _showOriginSuggestionsEmpty = false;
-  bool _showDestinationSuggestionsEmpty = false;
-
-  // ignore: unused_field
-  String? _selectedOriginPlaceId; // stored for future routing/geocoding
-  String? _selectedOriginFullText;
-  // ignore: unused_field
-  String? _selectedDestinationPlaceId; // stored for future routing/geocoding
-  String? _selectedDestinationFullText;
-
   @override
   void initState() {
     super.initState();
@@ -245,133 +226,9 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _mapController?.dispose();
-    _originDebounce?.cancel();
-    _destinationDebounce?.cancel();
     _currentPositionController.dispose();
     _destinationController.dispose();
     super.dispose();
-  }
-
-  void _onOriginChanged(String value) {
-    // If user edits after selecting, clear stored selection.
-    if (_selectedOriginFullText != null && value.trim() != _selectedOriginFullText) {
-      _selectedOriginFullText = null;
-      _selectedOriginPlaceId = null;
-    }
-
-    _originDebounce?.cancel();
-    final query = value.trim();
-    if (query.length < 2) {
-      setState(() {
-        _originSuggestions = [];
-        _originSuggestionsError = null;
-        _isOriginSuggestionsLoading = false;
-        _showOriginSuggestionsEmpty = false;
-      });
-      return;
-    }
-    _originDebounce = Timer(const Duration(milliseconds: 350), () async {
-      setState(() {
-        _isOriginSuggestionsLoading = true;
-        _originSuggestionsError = null;
-        _showOriginSuggestionsEmpty = true;
-      });
-      final result = await ApiService().placesAutocomplete(query: query);
-      if (!mounted) return;
-      if (result['success'] != true) {
-        setState(() {
-          _isOriginSuggestionsLoading = false;
-          _originSuggestions = [];
-          _originSuggestionsError =
-              result['message'] as String? ?? 'Failed to fetch suggestions.';
-        });
-        return;
-      }
-      final raw = (result['suggestions'] as List<dynamic>? ?? []);
-      final suggestions = raw
-          .whereType<Map<String, dynamic>>()
-          .map(_PlaceSuggestion.fromJson)
-          .toList();
-      setState(() {
-        _isOriginSuggestionsLoading = false;
-        _originSuggestions = suggestions;
-        _originSuggestionsError = null;
-      });
-    });
-  }
-
-  void _onDestinationChanged(String value) {
-    if (_selectedDestinationFullText != null &&
-        value.trim() != _selectedDestinationFullText) {
-      _selectedDestinationFullText = null;
-      _selectedDestinationPlaceId = null;
-    }
-
-    _destinationDebounce?.cancel();
-    final query = value.trim();
-    if (query.length < 2) {
-      setState(() {
-        _destinationSuggestions = [];
-        _destinationSuggestionsError = null;
-        _isDestinationSuggestionsLoading = false;
-        _showDestinationSuggestionsEmpty = false;
-      });
-      return;
-    }
-    _destinationDebounce = Timer(const Duration(milliseconds: 350), () async {
-      setState(() {
-        _isDestinationSuggestionsLoading = true;
-        _destinationSuggestionsError = null;
-        _showDestinationSuggestionsEmpty = true;
-      });
-      final result = await ApiService().placesAutocomplete(query: query);
-      if (!mounted) return;
-      if (result['success'] != true) {
-        setState(() {
-          _isDestinationSuggestionsLoading = false;
-          _destinationSuggestions = [];
-          _destinationSuggestionsError =
-              result['message'] as String? ?? 'Failed to fetch suggestions.';
-        });
-        return;
-      }
-      final raw = (result['suggestions'] as List<dynamic>? ?? []);
-      final suggestions = raw
-          .whereType<Map<String, dynamic>>()
-          .map(_PlaceSuggestion.fromJson)
-          .toList();
-      setState(() {
-        _isDestinationSuggestionsLoading = false;
-        _destinationSuggestions = suggestions;
-        _destinationSuggestionsError = null;
-      });
-    });
-  }
-
-  void _selectOriginSuggestion(_PlaceSuggestion s) {
-    setState(() {
-      _selectedOriginPlaceId = s.placeId;
-      _selectedOriginFullText = s.fullText;
-      _originSuggestions = [];
-      _originSuggestionsError = null;
-      _isOriginSuggestionsLoading = false;
-      _showOriginSuggestionsEmpty = false;
-    });
-    _currentPositionController.text = s.fullText;
-    FocusScope.of(context).unfocus();
-  }
-
-  void _selectDestinationSuggestion(_PlaceSuggestion s) {
-    setState(() {
-      _selectedDestinationPlaceId = s.placeId;
-      _selectedDestinationFullText = s.fullText;
-      _destinationSuggestions = [];
-      _destinationSuggestionsError = null;
-      _isDestinationSuggestionsLoading = false;
-      _showDestinationSuggestionsEmpty = false;
-    });
-    _destinationController.text = s.fullText;
-    FocusScope.of(context).unfocus();
   }
 
   @override
@@ -388,7 +245,8 @@ class _MapScreenState extends State<MapScreen> {
     final mapHeight = _isMapExpanded ? height : height * 0.45;
 
     return Scaffold(
-      resizeToAvoidBottomInset: true,
+      // Keep the map stable; the bottom sheet handles keyboard insets itself.
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(title: const Text('Map')),
       body: Column(
         children: [
@@ -487,18 +345,6 @@ class _MapScreenState extends State<MapScreen> {
                 distanceText: _distanceText,
                 durationText: _durationText,
                 onGetRoute: _getRoute,
-                onOriginChanged: _onOriginChanged,
-                onDestinationChanged: _onDestinationChanged,
-                originSuggestions: _originSuggestions,
-                destinationSuggestions: _destinationSuggestions,
-                originSuggestionsLoading: _isOriginSuggestionsLoading,
-                destinationSuggestionsLoading: _isDestinationSuggestionsLoading,
-                originSuggestionsError: _originSuggestionsError,
-                destinationSuggestionsError: _destinationSuggestionsError,
-                onSelectOriginSuggestion: _selectOriginSuggestion,
-                onSelectDestinationSuggestion: _selectDestinationSuggestion,
-                showOriginEmpty: _showOriginSuggestionsEmpty,
-                showDestinationEmpty: _showDestinationSuggestionsEmpty,
               ),
             ),
         ],
@@ -507,7 +353,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 }
 
-class _RoutePlannerPanel extends StatelessWidget {
+class _RoutePlannerPanel extends StatefulWidget {
   const _RoutePlannerPanel({
     required this.currentPositionController,
     required this.destinationController,
@@ -515,18 +361,6 @@ class _RoutePlannerPanel extends StatelessWidget {
     required this.distanceText,
     required this.durationText,
     required this.onGetRoute,
-    required this.onOriginChanged,
-    required this.onDestinationChanged,
-    required this.originSuggestions,
-    required this.destinationSuggestions,
-    required this.originSuggestionsLoading,
-    required this.destinationSuggestionsLoading,
-    required this.originSuggestionsError,
-    required this.destinationSuggestionsError,
-    required this.onSelectOriginSuggestion,
-    required this.onSelectDestinationSuggestion,
-    required this.showOriginEmpty,
-    required this.showDestinationEmpty,
   });
 
   final TextEditingController currentPositionController;
@@ -535,18 +369,188 @@ class _RoutePlannerPanel extends StatelessWidget {
   final String? distanceText;
   final String? durationText;
   final VoidCallback onGetRoute;
-  final ValueChanged<String> onOriginChanged;
-  final ValueChanged<String> onDestinationChanged;
-  final List<_PlaceSuggestion> originSuggestions;
-  final List<_PlaceSuggestion> destinationSuggestions;
-  final bool originSuggestionsLoading;
-  final bool destinationSuggestionsLoading;
-  final String? originSuggestionsError;
-  final String? destinationSuggestionsError;
-  final ValueChanged<_PlaceSuggestion> onSelectOriginSuggestion;
-  final ValueChanged<_PlaceSuggestion> onSelectDestinationSuggestion;
-  final bool showOriginEmpty;
-  final bool showDestinationEmpty;
+
+  @override
+  State<_RoutePlannerPanel> createState() => _RoutePlannerPanelState();
+}
+
+class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
+  final FocusNode _originFocusNode = FocusNode();
+  final FocusNode _destinationFocusNode = FocusNode();
+
+  Timer? _originDebounce;
+  Timer? _destinationDebounce;
+
+  bool _isOriginSuggestionsLoading = false;
+  bool _isDestinationSuggestionsLoading = false;
+  List<_PlaceSuggestion> _originSuggestions = [];
+  List<_PlaceSuggestion> _destinationSuggestions = [];
+  String? _originSuggestionsError;
+  String? _destinationSuggestionsError;
+  bool _showOriginSuggestionsBox = false;
+  bool _showDestinationSuggestionsBox = false;
+
+  // Stored for future routing/geocoding (place_id + selected text).
+  // ignore: unused_field
+  String? _selectedOriginPlaceId;
+  String? _selectedOriginFullText;
+  // ignore: unused_field
+  String? _selectedDestinationPlaceId;
+  String? _selectedDestinationFullText;
+
+  @override
+  void initState() {
+    super.initState();
+    _originFocusNode.addListener(() {
+      if (!_originFocusNode.hasFocus) {
+        setState(() => _showOriginSuggestionsBox = false);
+      }
+    });
+    _destinationFocusNode.addListener(() {
+      if (!_destinationFocusNode.hasFocus) {
+        setState(() => _showDestinationSuggestionsBox = false);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _originDebounce?.cancel();
+    _destinationDebounce?.cancel();
+    _originFocusNode.dispose();
+    _destinationFocusNode.dispose();
+    super.dispose();
+  }
+
+  void _onOriginChanged(String value) {
+    final query = value.trim();
+    if (_selectedOriginFullText != null && query != _selectedOriginFullText) {
+      _selectedOriginFullText = null;
+      _selectedOriginPlaceId = null;
+    }
+
+    _originDebounce?.cancel();
+    if (query.length < 2) {
+      setState(() {
+        _originSuggestions = [];
+        _originSuggestionsError = null;
+        _isOriginSuggestionsLoading = false;
+        _showOriginSuggestionsBox = false;
+      });
+      return;
+    }
+
+    // Do minimal work on each keystroke; network + setState happens after debounce.
+    _originDebounce = Timer(const Duration(milliseconds: 300), () async {
+      if (!mounted) return;
+      setState(() {
+        _isOriginSuggestionsLoading = true;
+        _originSuggestionsError = null;
+        _showOriginSuggestionsBox = _originFocusNode.hasFocus;
+      });
+      final result = await ApiService().placesAutocomplete(query: query);
+      if (!mounted) return;
+      if (result['success'] != true) {
+        setState(() {
+          _isOriginSuggestionsLoading = false;
+          _originSuggestions = [];
+          _originSuggestionsError =
+              result['message'] as String? ?? 'Failed to fetch suggestions.';
+          _showOriginSuggestionsBox = _originFocusNode.hasFocus;
+        });
+        return;
+      }
+      final raw = (result['suggestions'] as List<dynamic>? ?? []);
+      final suggestions = raw
+          .whereType<Map<String, dynamic>>()
+          .map(_PlaceSuggestion.fromJson)
+          .toList();
+      setState(() {
+        _isOriginSuggestionsLoading = false;
+        _originSuggestions = suggestions;
+        _originSuggestionsError = null;
+        _showOriginSuggestionsBox = _originFocusNode.hasFocus;
+      });
+    });
+  }
+
+  void _onDestinationChanged(String value) {
+    final query = value.trim();
+    if (_selectedDestinationFullText != null &&
+        query != _selectedDestinationFullText) {
+      _selectedDestinationFullText = null;
+      _selectedDestinationPlaceId = null;
+    }
+
+    _destinationDebounce?.cancel();
+    if (query.length < 2) {
+      setState(() {
+        _destinationSuggestions = [];
+        _destinationSuggestionsError = null;
+        _isDestinationSuggestionsLoading = false;
+        _showDestinationSuggestionsBox = false;
+      });
+      return;
+    }
+
+    _destinationDebounce = Timer(const Duration(milliseconds: 300), () async {
+      if (!mounted) return;
+      setState(() {
+        _isDestinationSuggestionsLoading = true;
+        _destinationSuggestionsError = null;
+        _showDestinationSuggestionsBox = _destinationFocusNode.hasFocus;
+      });
+      final result = await ApiService().placesAutocomplete(query: query);
+      if (!mounted) return;
+      if (result['success'] != true) {
+        setState(() {
+          _isDestinationSuggestionsLoading = false;
+          _destinationSuggestions = [];
+          _destinationSuggestionsError =
+              result['message'] as String? ?? 'Failed to fetch suggestions.';
+          _showDestinationSuggestionsBox = _destinationFocusNode.hasFocus;
+        });
+        return;
+      }
+      final raw = (result['suggestions'] as List<dynamic>? ?? []);
+      final suggestions = raw
+          .whereType<Map<String, dynamic>>()
+          .map(_PlaceSuggestion.fromJson)
+          .toList();
+      setState(() {
+        _isDestinationSuggestionsLoading = false;
+        _destinationSuggestions = suggestions;
+        _destinationSuggestionsError = null;
+        _showDestinationSuggestionsBox = _destinationFocusNode.hasFocus;
+      });
+    });
+  }
+
+  void _selectOriginSuggestion(_PlaceSuggestion s) {
+    setState(() {
+      _selectedOriginPlaceId = s.placeId;
+      _selectedOriginFullText = s.fullText;
+      _originSuggestions = [];
+      _originSuggestionsError = null;
+      _isOriginSuggestionsLoading = false;
+      _showOriginSuggestionsBox = false;
+    });
+    widget.currentPositionController.text = s.fullText;
+    _destinationFocusNode.requestFocus();
+  }
+
+  void _selectDestinationSuggestion(_PlaceSuggestion s) {
+    setState(() {
+      _selectedDestinationPlaceId = s.placeId;
+      _selectedDestinationFullText = s.fullText;
+      _destinationSuggestions = [];
+      _destinationSuggestionsError = null;
+      _isDestinationSuggestionsLoading = false;
+      _showDestinationSuggestionsBox = false;
+    });
+    widget.destinationController.text = s.fullText;
+    FocusScope.of(context).unfocus();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -609,21 +613,25 @@ class _RoutePlannerPanel extends StatelessWidget {
                     ),
                     const SizedBox(height: 6),
                     TextField(
-                      controller: currentPositionController,
-                      onChanged: onOriginChanged,
+                      controller: widget.currentPositionController,
+                      focusNode: _originFocusNode,
+                      onChanged: _onOriginChanged,
+                      textInputAction: TextInputAction.next,
+                      onSubmitted: (_) => _destinationFocusNode.requestFocus(),
                       decoration: InputDecoration(
                         prefixIcon: const Icon(Icons.my_location),
                         hintText: 'Use current location or enter a place',
                       ),
                     ),
-                    _SuggestionsDropdown(
-                      suggestions: originSuggestions,
-                      isLoading: originSuggestionsLoading,
-                      errorMessage: originSuggestionsError,
-                      emptyMessage: 'No matches found',
-                      onTapSuggestion: onSelectOriginSuggestion,
-                      showWhenEmpty: showOriginEmpty,
-                    ),
+                    if (_showOriginSuggestionsBox)
+                      _SuggestionsDropdown(
+                        suggestions: _originSuggestions,
+                        isLoading: _isOriginSuggestionsLoading,
+                        errorMessage: _originSuggestionsError,
+                        emptyMessage: 'No matches found',
+                        onTapSuggestion: _selectOriginSuggestion,
+                        showWhenEmpty: true,
+                      ),
                     const SizedBox(height: 16),
                     Text(
                       'Destination',
@@ -633,28 +641,33 @@ class _RoutePlannerPanel extends StatelessWidget {
                     ),
                     const SizedBox(height: 6),
                     TextField(
-                      controller: destinationController,
-                      onChanged: onDestinationChanged,
+                      controller: widget.destinationController,
+                      focusNode: _destinationFocusNode,
+                      onChanged: _onDestinationChanged,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => FocusScope.of(context).unfocus(),
                       decoration: const InputDecoration(
                         prefixIcon: Icon(Icons.place),
                         hintText: 'Where do you want to go?',
                       ),
                     ),
-                    _SuggestionsDropdown(
-                      suggestions: destinationSuggestions,
-                      isLoading: destinationSuggestionsLoading,
-                      errorMessage: destinationSuggestionsError,
-                      emptyMessage: 'No matches found',
-                      onTapSuggestion: onSelectDestinationSuggestion,
-                      showWhenEmpty: showDestinationEmpty,
-                    ),
+                    if (_showDestinationSuggestionsBox)
+                      _SuggestionsDropdown(
+                        suggestions: _destinationSuggestions,
+                        isLoading: _isDestinationSuggestionsLoading,
+                        errorMessage: _destinationSuggestionsError,
+                        emptyMessage: 'No matches found',
+                        onTapSuggestion: _selectDestinationSuggestion,
+                        showWhenEmpty: true,
+                      ),
                     const SizedBox(height: 16),
                     Row(
                       children: [
                         Expanded(
                           child: FilledButton(
-                            onPressed: isRouteLoading ? null : onGetRoute,
-                            child: isRouteLoading
+                            onPressed:
+                                widget.isRouteLoading ? null : widget.onGetRoute,
+                            child: widget.isRouteLoading
                                 ? const SizedBox(
                                     height: 18,
                                     width: 18,
@@ -667,12 +680,13 @@ class _RoutePlannerPanel extends StatelessWidget {
                         ),
                       ],
                     ),
-                    if (distanceText != null || durationText != null) ...[
+                    if (widget.distanceText != null ||
+                        widget.durationText != null) ...[
                       const SizedBox(height: 12),
                       Text(
                         [
-                          distanceText,
-                          durationText,
+                          widget.distanceText,
+                          widget.durationText,
                         ].whereType<String>().join(' • '),
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,

@@ -13,6 +13,8 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _emailFocusNode = FocusNode();
+  final _passwordFocusNode = FocusNode();
   final _authService = AuthService();
   bool _loading = false;
   String? _errorMessage;
@@ -21,6 +23,8 @@ class _LoginScreenState extends State<LoginScreen> {
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _emailFocusNode.dispose();
+    _passwordFocusNode.dispose();
     super.dispose();
   }
 
@@ -69,22 +73,38 @@ class _LoginScreenState extends State<LoginScreen> {
                   children: [
                     TextField(
                       controller: _emailController,
+                      focusNode: _emailFocusNode,
                       keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      autofillHints: const [AutofillHints.email],
                       decoration: const InputDecoration(
                         labelText: 'Email',
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (_) => setState(() => _errorMessage = null),
+                      onSubmitted: (_) => _passwordFocusNode.requestFocus(),
+                      onChanged: (_) {
+                        if (_errorMessage != null) {
+                          setState(() => _errorMessage = null);
+                        }
+                      },
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _passwordController,
+                      focusNode: _passwordFocusNode,
                       obscureText: true,
+                      textInputAction: TextInputAction.done,
+                      autofillHints: const [AutofillHints.password],
                       decoration: const InputDecoration(
                         labelText: 'Password',
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (_) => setState(() => _errorMessage = null),
+                      onSubmitted: (_) => _loading ? null : _login(),
+                      onChanged: (_) {
+                        if (_errorMessage != null) {
+                          setState(() => _errorMessage = null);
+                        }
+                      },
                     ),
                     if (_errorMessage != null) ...[
                       const SizedBox(height: 12),

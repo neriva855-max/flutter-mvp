@@ -13,6 +13,9 @@ class _SignupScreenState extends State<SignupScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
+  final _emailFocusNode = FocusNode();
+  final _passwordFocusNode = FocusNode();
+  final _confirmPasswordFocusNode = FocusNode();
   final _authService = AuthService();
   bool _loading = false;
   String? _errorMessage;
@@ -22,6 +25,9 @@ class _SignupScreenState extends State<SignupScreen> {
     _emailController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
+    _emailFocusNode.dispose();
+    _passwordFocusNode.dispose();
+    _confirmPasswordFocusNode.dispose();
     super.dispose();
   }
 
@@ -72,32 +78,57 @@ class _SignupScreenState extends State<SignupScreen> {
                   children: [
                     TextField(
                       controller: _emailController,
+                      focusNode: _emailFocusNode,
                       keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      autofillHints: const [AutofillHints.email],
                       decoration: const InputDecoration(
                         labelText: 'Email',
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (_) => setState(() => _errorMessage = null),
+                      onSubmitted: (_) => _passwordFocusNode.requestFocus(),
+                      onChanged: (_) {
+                        if (_errorMessage != null) {
+                          setState(() => _errorMessage = null);
+                        }
+                      },
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _passwordController,
+                      focusNode: _passwordFocusNode,
                       obscureText: true,
+                      textInputAction: TextInputAction.next,
+                      autofillHints: const [AutofillHints.newPassword],
                       decoration: const InputDecoration(
                         labelText: 'Password',
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (_) => setState(() => _errorMessage = null),
+                      onSubmitted: (_) =>
+                          _confirmPasswordFocusNode.requestFocus(),
+                      onChanged: (_) {
+                        if (_errorMessage != null) {
+                          setState(() => _errorMessage = null);
+                        }
+                      },
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _confirmPasswordController,
+                      focusNode: _confirmPasswordFocusNode,
                       obscureText: true,
+                      textInputAction: TextInputAction.done,
+                      autofillHints: const [AutofillHints.newPassword],
                       decoration: const InputDecoration(
                         labelText: 'Confirm password',
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (_) => setState(() => _errorMessage = null),
+                      onSubmitted: (_) => _loading ? null : _signup(),
+                      onChanged: (_) {
+                        if (_errorMessage != null) {
+                          setState(() => _errorMessage = null);
+                        }
+                      },
                     ),
                     if (_errorMessage != null) ...[
                       const SizedBox(height: 12),
