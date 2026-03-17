@@ -240,48 +240,59 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
-    final mediaQuery = MediaQuery.of(context);
-    final height = mediaQuery.size.height;
-    final mapHeight = _isMapExpanded ? height : height * 0.45;
-
     return Scaffold(
       // Keep the map stable; the bottom sheet handles keyboard insets itself.
       resizeToAvoidBottomInset: false,
       appBar: AppBar(title: const Text('Map')),
-      body: Column(
-        children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeInOut,
-            height: mapHeight,
-            width: double.infinity,
-            child: Stack(
-              children: [
-                GoogleMap(
-                  initialCameraPosition: CameraPosition(
-                    target: _currentPosition ?? _defaultPosition,
-                    zoom: 14,
-                  ),
-                  onMapCreated: (controller) {
-                    _mapController = controller;
-                    if (_currentPosition != null) {
-                      _mapController!.moveCamera(
-                        CameraUpdate.newCameraPosition(
-                          CameraPosition(
-                            target: _currentPosition!,
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final height = constraints.maxHeight;
+          final mapHeight = _isMapExpanded ? height : height * 0.45;
+
+          return Column(
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeOutCubic,
+                height: mapHeight,
+                width: double.infinity,
+                child: Stack(
+                  children: [
+                    // Prevent keyboard insets (MediaQuery.viewInsets) from
+                    // propagating into the map subtree. This reduces rebuild/
+                    // relayout work when the keyboard opens, which helps the
+                    // keyboard animation feel more responsive.
+                    MediaQuery.removeViewInsets(
+                      context: context,
+                      removeBottom: true,
+                      child: RepaintBoundary(
+                        child: GoogleMap(
+                          initialCameraPosition: CameraPosition(
+                            target: _currentPosition ?? _defaultPosition,
                             zoom: 14,
                           ),
+                          onMapCreated: (controller) {
+                            _mapController = controller;
+                            if (_currentPosition != null) {
+                              _mapController!.moveCamera(
+                                CameraUpdate.newCameraPosition(
+                                  CameraPosition(
+                                    target: _currentPosition!,
+                                    zoom: 14,
+                                  ),
+                                ),
+                              );
+                            } else if (_locationPermissionGranted) {
+                              _getCurrentPosition();
+                            }
+                          },
+                          myLocationEnabled: _locationPermissionGranted,
+                          myLocationButtonEnabled: false,
+                          markers: _markers,
+                          polylines: _polylines,
                         ),
-                      );
-                    } else if (_locationPermissionGranted) {
-                      _getCurrentPosition();
-                    }
-                  },
-                  myLocationEnabled: _locationPermissionGranted,
-                  myLocationButtonEnabled: false,
-                  markers: _markers,
-                  polylines: _polylines,
-                ),
+                      ),
+                    ),
                 if (_errorMessage != null)
                   Positioned(
                     top: 16,
@@ -333,21 +344,23 @@ class _MapScreenState extends State<MapScreen> {
                     child: const Icon(Icons.my_location),
                   ),
                 ),
-              ],
-            ),
-          ),
-          if (!_isMapExpanded)
-            Expanded(
-              child: _RoutePlannerPanel(
-                currentPositionController: _currentPositionController,
-                destinationController: _destinationController,
-                isRouteLoading: _isRouteLoading,
-                distanceText: _distanceText,
-                durationText: _durationText,
-                onGetRoute: _getRoute,
+                  ],
+                ),
               ),
-            ),
-        ],
+              if (!_isMapExpanded)
+                Expanded(
+                  child: _RoutePlannerPanel(
+                    currentPositionController: _currentPositionController,
+                    destinationController: _destinationController,
+                    isRouteLoading: _isRouteLoading,
+                    distanceText: _distanceText,
+                    durationText: _durationText,
+                    onGetRoute: _getRoute,
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -577,6 +590,7 @@ class _RoutePlannerPanelState extends State<_RoutePlannerPanel> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             return SingleChildScrollView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: EdgeInsets.fromLTRB(
                 20,
                 12,
