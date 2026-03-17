@@ -317,8 +317,9 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     final currentKmh = _currentVelocity * 3.6;
     final maxKmh = _maxVelocity * 3.6;
 
-    final peakAccelFor0100 = _maxAccel;
-    final peak0100Seconds = _computeZeroToHundredSeconds(peakAccelFor0100);
+    final peak0100Seconds = _computeZeroToHundredSeconds(_maxAccel);
+    final leanDeg = _pitchSmoothed.abs() * 180 / math.pi;
+    final leanDanger = leanDeg >= 45.0;
 
     return Scaffold(
       appBar: AppBar(
@@ -388,14 +389,15 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
                   Row(
                     children: [
                       _TiltBox(
-                        label: 'Pitch',
+                        label: 'Lean Angle',
                         angleRad: _pitchSmoothed,
                         size: boxSize,
                         mode: _TiltMode.pitch,
+                        danger: leanDanger,
                       ),
                       const SizedBox(width: 12),
                       _TiltBox(
-                        label: 'Roll',
+                        label: 'Steering Angle',
                         angleRad: _rollSmoothed,
                         size: boxSize,
                         mode: _TiltMode.roll,
@@ -426,33 +428,32 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
                       _MetricCard(
                         title: 'Current Acceleration',
                         value: '${_currentAccel.toStringAsFixed(2)} m/s²',
-                        subline: peak0100Seconds == null
-                            ? 'Peak acceleration equivalent 0–100 km/h: —'
-                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                        emphasizeValue: true,
+                        subline: _motionSource == _MotionMetricSource.none
+                            ? 'No acceleration source available'
+                            : 'Live',
                       ),
                       _MetricCard(
                         title: 'Current Velocity',
                         value: '${currentKmh.toStringAsFixed(1)} km/h',
-                        subline: peak0100Seconds == null
-                            ? 'Peak acceleration equivalent 0–100 km/h: —'
-                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                        emphasizeValue: true,
+                        subline:
+                            'Estimated (from phone sensors; may drift)',
                       ),
                       _MetricCard(
                         title: 'Max Acceleration (ride)',
                         value: '${_maxAccel.toStringAsFixed(2)} m/s²',
-                        subline: peak0100Seconds == null
-                            ? 'Peak acceleration equivalent 0–100 km/h: —'
-                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                        subline: 'Session peak',
                       ),
                       _MetricCard(
                         title: 'Max Velocity (ride)',
                         value: '${maxKmh.toStringAsFixed(1)} km/h',
-                        subline: peak0100Seconds == null
-                            ? 'Peak acceleration equivalent 0–100 km/h: —'
-                            : 'Peak acceleration equivalent 0–100 km/h: ${peak0100Seconds.toStringAsFixed(1)} s',
+                        subline: 'Session peak',
                       ),
                     ],
                   ),
+                  const SizedBox(height: 12),
+                  _ZeroToHundredBar(seconds: peak0100Seconds),
                 ],
               );
             },
@@ -487,11 +488,13 @@ class _MetricCard extends StatelessWidget {
     required this.title,
     required this.value,
     required this.subline,
+    this.emphasizeValue = false,
   });
 
   final String title;
   final String value;
   final String subline;
+  final bool emphasizeValue;
 
   @override
   Widget build(BuildContext context) {
@@ -512,12 +515,15 @@ class _MetricCard extends StatelessWidget {
                 title,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: emphasizeValue ? FontWeight.w600 : null,
                 ),
               ),
               const SizedBox(height: 6),
               Text(
                 value,
-                style: theme.textTheme.titleMedium,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: emphasizeValue ? FontWeight.w700 : null,
+                ),
               ),
               const SizedBox(height: 10),
               Text(
@@ -540,17 +546,21 @@ class _TiltBox extends StatelessWidget {
     required this.angleRad,
     required this.size,
     required this.mode,
+    this.danger = false,
   });
 
   final String label;
   final double angleRad;
   final double size;
   final _TiltMode mode;
+  final bool danger;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final angleDeg = angleRad * 180 / math.pi;
+    final textColor = danger ? theme.colorScheme.error : Colors.white;
+    final barColor = danger ? theme.colorScheme.error : Colors.white;
 
     return SizedBox(
       width: size,
@@ -560,7 +570,7 @@ class _TiltBox extends StatelessWidget {
           angleRad: angleRad,
           mode: mode,
           backgroundColor: Colors.black,
-          foregroundColor: Colors.white,
+          foregroundColor: barColor,
         ),
         child: Padding(
           padding: const EdgeInsets.all(12),
@@ -570,19 +580,59 @@ class _TiltBox extends StatelessWidget {
               Text(
                 label,
                 style: theme.textTheme.titleMedium?.copyWith(
-                  color: Colors.white,
+                  color: textColor,
                 ),
               ),
               const SizedBox(height: 4),
               Text(
                 '${angleDeg.toStringAsFixed(1)}°',
                 style: theme.textTheme.bodySmall?.copyWith(
-                  color: Colors.white.withValues(alpha: 0.85),
+                  color: textColor.withValues(alpha: 0.85),
                 ),
               ),
               const Spacer(),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ZeroToHundredBar extends StatelessWidget {
+  const _ZeroToHundredBar({required this.seconds});
+
+  final double? seconds;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final text = seconds == null
+        ? 'Peak acceleration equivalent 0–100 km/h: —'
+        : 'Peak acceleration equivalent 0–100 km/h: ${seconds!.toStringAsFixed(1)} s';
+
+    return Material(
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              Icons.timer_outlined,
+              size: 18,
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
