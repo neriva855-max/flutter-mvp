@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 class LiveMonitoringScreen extends StatefulWidget {
@@ -15,6 +16,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   StreamSubscription<AccelerometerEvent>? _accelSub;
   StreamSubscription<UserAccelerometerEvent>? _userAccelSub;
   StreamSubscription<GyroscopeEvent>? _gyroSub;
+  StreamSubscription<Position>? _posSub;
 
   _SensorStrategy? _strategy;
   _MotionMetricSource _motionSource = _MotionMetricSource.none;
@@ -37,10 +39,15 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
 
   // Motion metrics (session = "current ride" while this page is active).
   double _currentAccel = 0.0; // m/s^2 (magnitude)
-  double _currentVelocity = 0.0; // m/s (estimated; drift-prone)
+  double _sensorVelocity = 0.0; // m/s (estimated; drift-prone)
+  double _gpsVelocity = 0.0; // m/s (from location speed)
   double _maxAccel = 0.0; // m/s^2
-  double _maxVelocity = 0.0; // m/s
+  double _maxVelocity = 0.0; // m/s (based on preferred source)
   DateTime? _lastMotionTs;
+  DateTime? _lastGpsTs;
+  _VelocitySource _velocitySource = _VelocitySource.none;
+  String? _gpsError;
+  DateTime? _lastMetricsUiTs;
 
   DateTime? _lastGyroTs;
   String? _sensorError;
@@ -88,6 +95,10 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     } else {
       setState(() => _strategy = _SensorStrategy.none);
     }
+
+    // Independently try to enable GPS speed (preferred velocity source).
+    // If unavailable/denied, we fall back to sensor-derived velocity.
+    _initGpsSpeed();
   }
 
   Future<bool> _probeStream<T>(Stream<T> Function() streamFactory) async {
@@ -263,6 +274,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     _currentAccel = _lerp(_currentAccel, clamped, accelAlpha);
 
     // Update max acceleration with a small noise floor.
+    final prevMaxAccel = _maxAccel;
     if (_currentAccel.isFinite && _currentAccel > 0.3) {
       _maxAccel = math.max(_maxAccel, _currentAccel);
     }
@@ -274,25 +286,117 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
       final effectiveAccel = (_currentAccel < 0.25) ? 0.0 : _currentAccel;
 
       // Integrate as "speed magnitude". This is not true vehicle speed.
-      _currentVelocity += effectiveAccel * dt;
+      _sensorVelocity += effectiveAccel * dt;
 
       // Drift guard: gentle decay (simulates friction / bias removal).
       const decayPerSecond = 0.35; // m/s per second
-      _currentVelocity = math.max(0.0, _currentVelocity - decayPerSecond * dt);
+      _sensorVelocity = math.max(0.0, _sensorVelocity - decayPerSecond * dt);
 
       // Clamp to reasonable display range.
-      _currentVelocity = _currentVelocity.clamp(0.0, 60.0);
-      _maxVelocity = math.max(_maxVelocity, _currentVelocity);
+      _sensorVelocity = _sensorVelocity.clamp(0.0, 60.0);
+    }
+
+    // Update max velocity based on preferred (GPS if available, else sensor).
+    final displayedVelocity = _getDisplayedVelocityMps();
+    if (displayedVelocity.isFinite) {
+      _maxVelocity = math.max(_maxVelocity, displayedVelocity);
+    }
+
+    // Ensure UI updates even when max accel changes without other rebuild triggers.
+    final maxAccelChanged = _maxAccel != prevMaxAccel;
+    _maybeSetStateForMetrics(maxAccelChanged: maxAccelChanged);
+  }
+
+  double _getDisplayedVelocityMps() {
+    final gpsUsable = _isGpsSpeedUsable();
+    if (gpsUsable) {
+      _velocitySource = _VelocitySource.gps;
+      return _gpsVelocity;
+    }
+    _velocitySource = _sensorVelocity > 0 ? _VelocitySource.sensors : _VelocitySource.none;
+    return _sensorVelocity;
+  }
+
+  bool _isGpsSpeedUsable() {
+    final last = _lastGpsTs;
+    if (last == null) return false;
+    // Treat GPS speed as stale if we haven't received updates recently.
+    final ageMs = DateTime.now().difference(last).inMilliseconds;
+    return ageMs < 2500;
+  }
+
+  void _maybeSetStateForMetrics({required bool maxAccelChanged}) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    final last = _lastMetricsUiTs;
+    final elapsedMs = last == null ? 9999 : now.difference(last).inMilliseconds;
+
+    // Update UI frequently enough to feel live, but avoid rebuild storms.
+    if (maxAccelChanged || elapsedMs >= 80) {
+      _lastMetricsUiTs = now;
+      setState(() {});
+    }
+  }
+
+  Future<void> _initGpsSpeed() async {
+    _gpsError = null;
+    _lastGpsTs = null;
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        _gpsError = 'Location services disabled';
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        _gpsError = 'Location permission denied';
+        return;
+      }
+
+      _posSub?.cancel();
+      const settings = LocationSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+      );
+      _posSub = Geolocator.getPositionStream(locationSettings: settings)
+          .listen((pos) {
+        final speed = pos.speed; // m/s (may be 0 or noisy)
+        if (!speed.isFinite) return;
+
+        // Clamp and smooth GPS speed to reduce jitter.
+        final clamped = speed.clamp(0.0, 60.0);
+        const alpha = 0.25;
+        _gpsVelocity = _lerp(_gpsVelocity, clamped, alpha);
+        _lastGpsTs = DateTime.now();
+
+        // Update max velocity based on preferred source.
+        _maxVelocity = math.max(_maxVelocity, _gpsVelocity);
+
+        _maybeSetStateForMetrics(maxAccelChanged: false);
+      }, onError: (e) {
+        _gpsError = e.toString();
+        _lastGpsTs = null;
+      });
+    } catch (e) {
+      _gpsError = e.toString();
     }
   }
 
   void _resetRideStats() {
     setState(() {
       _currentAccel = 0.0;
-      _currentVelocity = 0.0;
+      _sensorVelocity = 0.0;
+      _gpsVelocity = 0.0;
       _maxAccel = 0.0;
       _maxVelocity = 0.0;
       _lastMotionTs = null;
+      _lastGpsTs = null;
+      _velocitySource = _VelocitySource.none;
     });
   }
 
@@ -300,9 +404,11 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     _accelSub?.cancel();
     _userAccelSub?.cancel();
     _gyroSub?.cancel();
+    _posSub?.cancel();
     _accelSub = null;
     _userAccelSub = null;
     _gyroSub = null;
+    _posSub = null;
   }
 
   @override
@@ -314,7 +420,8 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final currentKmh = _currentVelocity * 3.6;
+    final displayedVelocity = _getDisplayedVelocityMps();
+    final currentKmh = displayedVelocity * 3.6;
     final maxKmh = _maxVelocity * 3.6;
 
     final peak0100Seconds = _computeZeroToHundredSeconds(_maxAccel);
@@ -437,8 +544,13 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
                         title: 'Current Velocity',
                         value: '${currentKmh.toStringAsFixed(1)} km/h',
                         emphasizeValue: true,
-                        subline:
-                            'Estimated (from phone sensors; may drift)',
+                        subline: _velocitySource == _VelocitySource.gps
+                            ? 'GPS speed'
+                            : _velocitySource == _VelocitySource.sensors
+                                ? 'Estimated (fallback; may drift)'
+                                : (_gpsError != null
+                                    ? 'GPS unavailable: $_gpsError'
+                                    : 'Velocity unavailable'),
                       ),
                       _MetricCard(
                         title: 'Max Acceleration (ride)',
@@ -638,6 +750,8 @@ class _ZeroToHundredBar extends StatelessWidget {
     );
   }
 }
+
+enum _VelocitySource { gps, sensors, none }
 
 class _TiltBoxPainter extends CustomPainter {
   _TiltBoxPainter({
