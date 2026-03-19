@@ -3,9 +3,12 @@ import '../services/auth_service.dart';
 import 'login_screen.dart';
 import 'map_screen.dart';
 import 'live_monitoring_screen.dart';
+import 'ride_summary_screen.dart';
 
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.userEmail});
+
+  final String? userEmail;
 
   Widget _homeActionCard({
     required BuildContext context,
@@ -122,6 +125,20 @@ class HomeScreen extends StatelessWidget {
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => const LiveMonitoringScreen(),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 14),
+              _homeActionCard(
+                context: context,
+                title: 'Ride Summary',
+                subtitle: 'View your recent ride stats and overview',
+                icon: Icons.assessment_outlined,
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => RideSummaryScreen(userId: userEmail),
                     ),
                   );
                 },

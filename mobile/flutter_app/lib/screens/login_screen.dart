@@ -40,8 +40,9 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!mounted) return;
     setState(() => _loading = false);
     if (result['success'] == true) {
+      final userEmail = _emailController.text.trim().toLowerCase();
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        MaterialPageRoute(builder: (_) => HomeScreen(userEmail: userEmail)),
       );
     } else {
       setState(() {

@@ -44,8 +44,9 @@ class _SignupScreenState extends State<SignupScreen> {
     if (!mounted) return;
     setState(() => _loading = false);
     if (result['success'] == true) {
+      final userEmail = _emailController.text.trim().toLowerCase();
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        MaterialPageRoute(builder: (_) => HomeScreen(userEmail: userEmail)),
         (route) => false,
       );
     } else {

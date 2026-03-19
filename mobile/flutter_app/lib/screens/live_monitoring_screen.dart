@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
@@ -12,7 +14,8 @@ class LiveMonitoringScreen extends StatefulWidget {
   State<LiveMonitoringScreen> createState() => _LiveMonitoringScreenState();
 }
 
-class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
+class _LiveMonitoringScreenState extends State<LiveMonitoringScreen>
+    with SingleTickerProviderStateMixin {
   StreamSubscription<AccelerometerEvent>? _accelSub;
   StreamSubscription<UserAccelerometerEvent>? _userAccelSub;
   StreamSubscription<GyroscopeEvent>? _gyroSub;
@@ -33,10 +36,6 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   double _pitchRad = 0.0;
   double _rollRad = 0.0;
 
-  // Smoothed for UI responsiveness (final output).
-  double _pitchSmoothed = 0.0;
-  double _rollSmoothed = 0.0;
-
   // Motion metrics (session = "current ride" while this page is active).
   double _currentAccel = 0.0; // m/s^2 (magnitude)
   double _sensorVelocity = 0.0; // m/s (estimated; drift-prone)
@@ -52,10 +51,73 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   DateTime? _lastGyroTs;
   String? _sensorError;
 
+  // High-frequency tilt values are published to UI at a fixed max rate.
+  final ValueNotifier<_TiltUiState> _tiltUi =
+      ValueNotifier<_TiltUiState>(const _TiltUiState());
+  Ticker? _tiltUiTicker;
+  bool _tiltUiDirty = false;
+  double _lastPublishedPitch = 0.0;
+  double _lastPublishedRoll = 0.0;
+  double _displayPitchRad = 0.0;
+  double _displayRollRad = 0.0;
+  Duration _lastUiPublishElapsed = Duration.zero;
+
+  static const Duration _maxUiInterval = Duration(microseconds: 8333); // ~120 Hz
+  static const double _anglePublishEpsilonRad = 0.002; // ~0.11°
+  // Modest display smoothing: improves fluidity while keeping low latency.
+  static const double _displaySmoothingAlpha = 0.55;
+
   @override
   void initState() {
     super.initState();
+    _startTiltUiPublisher();
     _initSensors();
+  }
+
+  void _startTiltUiPublisher() {
+    _tiltUiTicker?.dispose();
+    _lastUiPublishElapsed = Duration.zero;
+    _tiltUiTicker = createTicker((elapsed) {
+      // Frame-synced publisher, capped to ~60 Hz.
+      if (elapsed - _lastUiPublishElapsed < _maxUiInterval) return;
+      _lastUiPublishElapsed = elapsed;
+      _publishTiltUi();
+    })..start();
+  }
+
+  void _markTiltUiDirty() {
+    _tiltUiDirty = true;
+  }
+
+  void _publishTiltUi({bool force = false}) {
+    if (!force && !_tiltUiDirty) return;
+
+    // Always use freshest fused targets, then apply one modest smoothing stage
+    // for visual polish without reintroducing heavy lag.
+    final targetPitch = _pitchRad;
+    final targetRoll = _rollRad;
+    _displayPitchRad = _lerp(_displayPitchRad, targetPitch, _displaySmoothingAlpha);
+    _displayRollRad = _lerp(_displayRollRad, targetRoll, _displaySmoothingAlpha);
+
+    final pitch = _displayPitchRad;
+    final roll = _displayRollRad;
+    final changedEnough =
+        (pitch - _lastPublishedPitch).abs() >= _anglePublishEpsilonRad ||
+            (roll - _lastPublishedRoll).abs() >= _anglePublishEpsilonRad;
+
+    if (!force && !changedEnough) {
+      _tiltUiDirty = false;
+      return;
+    }
+
+    _lastPublishedPitch = pitch;
+    _lastPublishedRoll = roll;
+    _tiltUi.value = _TiltUiState(
+      pitchRad: pitch,
+      rollRad: roll,
+      leanDanger: pitch.abs() * 180 / math.pi >= 45.0,
+    );
+    _tiltUiDirty = false;
   }
 
   Future<void> _initSensors() async {
@@ -174,11 +236,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
       _gyroPitchRad = _pitchRad;
       _gyroRollRad = _rollRad;
 
-      const uiAlpha = 0.22;
-      _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
-      _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
-
-      if (mounted) setState(() {});
+      _markTiltUiDirty();
     }, onError: (e) {
       if (mounted) setState(() => _sensorError = e.toString());
     });
@@ -200,9 +258,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
       _pitchRad = _wrapPi(pitch);
       _rollRad = _wrapPi(roll);
 
-      const uiAlpha = 0.22;
-      _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
-      _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
+      _markTiltUiDirty();
 
       if (_motionSource == _MotionMetricSource.accelHighPass) {
         final mag = math.sqrt(ax * ax + ay * ay + az * az);
@@ -210,7 +266,6 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
         _updateMotionMetrics(lin);
       }
 
-      if (mounted) setState(() {});
     }, onError: (e) {
       if (mounted) setState(() => _sensorError = e.toString());
     });
@@ -222,7 +277,6 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
         final az = event.z;
         final mag = math.sqrt(ax * ax + ay * ay + az * az);
         _updateMotionMetrics(mag);
-        if (mounted) setState(() {});
       }, onError: (e) {
         if (mounted) setState(() => _sensorError = e.toString());
       });
@@ -249,11 +303,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
       _pitchRad = _wrapPi(_pitchRad + event.x * dt);
       _rollRad = _wrapPi(_rollRad + event.y * dt);
 
-      const uiAlpha = 0.22;
-      _pitchSmoothed = _lerp(_pitchSmoothed, _pitchRad, uiAlpha);
-      _rollSmoothed = _lerp(_rollSmoothed, _rollRad, uiAlpha);
-
-      if (mounted) setState(() {});
+      _markTiltUiDirty();
     }, onError: (e) {
       if (mounted) setState(() => _sensorError = e.toString());
     });
@@ -414,6 +464,8 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   @override
   void dispose() {
     _cancelSubs();
+    _tiltUiTicker?.dispose();
+    _tiltUi.dispose();
     super.dispose();
   }
 
@@ -425,8 +477,6 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
     final maxKmh = _maxVelocity * 3.6;
 
     final peak0100Seconds = _computeZeroToHundredSeconds(_maxAccel);
-    final leanDeg = _pitchSmoothed.abs() * 180 / math.pi;
-    final leanDanger = leanDeg >= 45.0;
 
     return Scaffold(
       appBar: AppBar(
@@ -493,23 +543,9 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
                         ),
                       ),
                     ),
-                  Row(
-                    children: [
-                      _TiltBox(
-                        label: 'Lean Angle',
-                        angleRad: _pitchSmoothed,
-                        size: boxSize,
-                        mode: _TiltMode.pitch,
-                        danger: leanDanger,
-                      ),
-                      const SizedBox(width: 12),
-                      _TiltBox(
-                        label: 'Steering Angle',
-                        angleRad: _rollSmoothed,
-                        size: boxSize,
-                        mode: _TiltMode.roll,
-                      ),
-                    ],
+                  _LiveTiltPanel(
+                    tiltListenable: _tiltUi,
+                    boxSize: boxSize,
                   ),
                   const SizedBox(height: 16),
                   Text(
@@ -582,6 +618,18 @@ enum _MotionMetricSource { userAccel, accelHighPass, none }
 
 enum _TiltMode { pitch, roll }
 
+class _TiltUiState {
+  const _TiltUiState({
+    this.pitchRad = 0.0,
+    this.rollRad = 0.0,
+    this.leanDanger = false,
+  });
+
+  final double pitchRad;
+  final double rollRad;
+  final bool leanDanger;
+}
+
 double? _computeZeroToHundredSeconds(double accel) {
   // 100 km/h in m/s.
   const deltaV = 100 / 3.6;
@@ -647,6 +695,45 @@ class _MetricCard extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _LiveTiltPanel extends StatelessWidget {
+  const _LiveTiltPanel({
+    required this.tiltListenable,
+    required this.boxSize,
+  });
+
+  final ValueListenable<_TiltUiState> tiltListenable;
+  final double boxSize;
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: ValueListenableBuilder<_TiltUiState>(
+        valueListenable: tiltListenable,
+        builder: (context, tilt, _) {
+          return Row(
+            children: [
+              _TiltBox(
+                label: 'Lean Angle',
+                angleRad: tilt.pitchRad,
+                size: boxSize,
+                mode: _TiltMode.pitch,
+                danger: tilt.leanDanger,
+              ),
+              const SizedBox(width: 12),
+              _TiltBox(
+                label: 'Steering Angle',
+                angleRad: tilt.rollRad,
+                size: boxSize,
+                mode: _TiltMode.roll,
+              ),
+            ],
+          );
+        },
       ),
     );
   }

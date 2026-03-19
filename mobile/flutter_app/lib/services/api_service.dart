@@ -13,6 +13,50 @@ class ApiService {
 
   ApiService._();
 
+  /// Send ride telemetry to backend once per sample.
+  ///
+  /// Backend endpoint:
+  ///   POST $BASE_URL/ride_data
+  ///
+  /// Request body:
+  /// {
+  ///   "latitude": 53.0793,
+  ///   "longitude": 8.8017,
+  ///   "velocity": 12.4
+  /// }
+  Future<Map<String, dynamic>> postRideData({
+    required double latitude,
+    required double longitude,
+    required double velocity,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$BASE_URL/ride_data'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'latitude': latitude,
+          'longitude': longitude,
+          'velocity': velocity,
+        }),
+      );
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return {'success': data['success'] == true, ...data};
+      }
+
+      return {
+        'success': false,
+        'message': data['message'] ?? 'Ride data request failed',
+      };
+    } catch (_) {
+      return {
+        'success': false,
+        'message': 'Cannot reach server. Check BASE_URL and network.',
+      };
+    }
+  }
+
   /// Places autocomplete suggestions.
   ///
   /// Expects backend endpoint:
